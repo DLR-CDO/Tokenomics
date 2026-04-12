@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { Settings } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -59,8 +59,21 @@ function resolvePlatformId(pathname: string): string {
   return "global";
 }
 
+const PERSISTED_PARAMS = ["from", "to"] as const;
+
+function withSearchParams(href: string, searchParams: URLSearchParams): string {
+  const carry = new URLSearchParams();
+  for (const key of PERSISTED_PARAMS) {
+    const val = searchParams.get(key);
+    if (val) carry.set(key, val);
+  }
+  const qs = carry.toString();
+  return qs ? `${href}?${qs}` : href;
+}
+
 export function TopNav() {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const currentPlatformId = resolvePlatformId(pathname);
   const currentTabs = TABS[currentPlatformId] || TABS.global;
 
@@ -91,7 +104,7 @@ export function TopNav() {
           <div className="flex items-center gap-1 rounded-full bg-muted/60 p-1 min-w-max">
             {PLATFORMS.map((p) => {
               const active = currentPlatformId === p.id;
-              const href = `/${p.id}/overview`;
+              const href = withSearchParams(`/${p.id}/overview`, searchParams);
               return (
                 <Link
                   key={p.id}
@@ -129,8 +142,9 @@ export function TopNav() {
         <div className="mx-auto flex max-w-7xl items-center px-4">
           <nav className="flex items-center gap-6 overflow-x-auto no-scrollbar py-2">
             {currentTabs.map((t) => {
-              const href = `/${currentPlatformId}/${t.id}`;
-              const active = pathname === href || pathname.startsWith(`${href}/`);
+              const basePath = `/${currentPlatformId}/${t.id}`;
+              const href = withSearchParams(basePath, searchParams);
+              const active = pathname === basePath || pathname.startsWith(`${basePath}/`);
               return (
                 <Link
                   key={t.id}
