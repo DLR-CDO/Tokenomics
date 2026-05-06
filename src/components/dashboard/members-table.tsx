@@ -1,11 +1,13 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   flexRender,
   getCoreRowModel,
+  getSortedRowModel,
   useReactTable,
   type ColumnDef,
+  type SortingState,
 } from "@tanstack/react-table";
 
 import { Button } from "@/components/ui/button";
@@ -55,12 +57,16 @@ export function MembersTable({ rows, title, description }: { rows: RankedMemberR
     [],
   );
 
-  // TanStack Table returns unstable function references; safe here because rows drive rerenders.
+  const [sorting, setSorting] = useState<SortingState>([]);
+
   // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table integration
   const table = useReactTable({
     data: rows,
     columns,
     getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    onSortingChange: setSorting,
+    state: { sorting },
   });
 
   function downloadCsv() {
@@ -89,9 +95,28 @@ export function MembersTable({ rows, title, description }: { rows: RankedMemberR
           <TableHeader>
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id}>
-                {hg.headers.map((h) => (
-                  <TableHead key={h.id}>{h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}</TableHead>
-                ))}
+                {hg.headers.map((h) => {
+                  const canSort = h.column.getCanSort();
+                  const sorted = h.column.getIsSorted();
+                  return (
+                    <TableHead
+                      key={h.id}
+                      className={canSort ? "cursor-pointer select-none" : undefined}
+                      onClick={h.column.getToggleSortingHandler()}
+                    >
+                      {h.isPlaceholder ? null : (
+                        <div className="flex items-center gap-1">
+                          {flexRender(h.column.columnDef.header, h.getContext())}
+                          {canSort && (
+                            <span className="text-muted-foreground/60">
+                              {sorted === "asc" ? "↑" : sorted === "desc" ? "↓" : "↕"}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </TableHead>
+                  );
+                })}
               </TableRow>
             ))}
           </TableHeader>

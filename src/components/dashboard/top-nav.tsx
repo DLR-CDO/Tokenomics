@@ -5,12 +5,14 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { Settings } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { SliderPills } from "@/components/ui/slider-pills";
 
 const PLATFORMS = [
   { id: "global", label: "Global" },
   { id: "cursor", label: "Cursor" },
   { id: "openai-enterprise", label: "OpenAI Enterprise" },
   { id: "openai-api", label: "OpenAI API" },
+  { id: "claude-enterprise", label: "Claude Enterprise" },
   { id: "azure", label: "Azure" },
 ] as const;
 
@@ -42,6 +44,15 @@ const TABS: Record<string, readonly { id: string; label: string }[]> = {
     { id: "people", label: "People" },
     { id: "forecast", label: "Forecast" },
   ],
+  "claude-enterprise": [
+    { id: "overview", label: "Overview" },
+    { id: "activity", label: "Activity" },
+    { id: "people", label: "People" },
+    { id: "projects", label: "Projects" },
+    { id: "skills", label: "Skills" },
+    { id: "connectors", label: "Connectors" },
+    { id: "forecast", label: "Forecast" },
+  ],
   azure: [
     { id: "overview", label: "Overview" },
     { id: "activity", label: "Activity" },
@@ -59,7 +70,7 @@ function resolvePlatformId(pathname: string): string {
   return "global";
 }
 
-const PERSISTED_PARAMS = ["from", "to"] as const;
+const PERSISTED_PARAMS = ["from", "to", "datePreset"] as const;
 
 function withSearchParams(href: string, searchParams: URLSearchParams): string {
   const carry = new URLSearchParams();
@@ -101,7 +112,11 @@ export function TopNav() {
 
         {/* Tier 1: Platform Selector */}
         <nav className="flex flex-1 items-center justify-center overflow-x-auto no-scrollbar">
-          <div className="flex items-center gap-1 rounded-full bg-muted/60 p-1 min-w-max">
+          <SliderPills
+            activeKey={currentPlatformId}
+            ariaLabel="Platform"
+            className="min-w-max"
+          >
             {PLATFORMS.map((p) => {
               const active = currentPlatformId === p.id;
               const href = withSearchParams(`/${p.id}/overview`, searchParams);
@@ -109,18 +124,17 @@ export function TopNav() {
                 <Link
                   key={p.id}
                   href={href}
+                  data-pill-key={p.id}
                   className={cn(
-                    "rounded-full px-4 py-1.5 text-sm font-medium transition-all",
-                    active
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground",
+                    "relative z-10 rounded-full px-4 py-1.5 text-sm font-medium transition-colors",
+                    active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
                   )}
                 >
                   {p.label}
                 </Link>
               );
             })}
-          </div>
+          </SliderPills>
         </nav>
 
         <Link

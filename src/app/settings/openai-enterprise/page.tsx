@@ -6,6 +6,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatUsd } from "@/lib/format";
 import {
+  computeEnterpriseCreditRates,
+  formatCreditValuation,
+  hasAnyCreditRate,
+  valuateCredits,
+} from "@/lib/enterprise-credits";
+import {
   useSeatConfig,
   CsvUploadZone,
 } from "@/components/dashboard/settings-client";
@@ -15,8 +21,23 @@ export default function OpenAIEnterpriseSettingsPage() {
 
   const entSeats = parseInt(seats.seatCount, 10) || 0;
   const entAnnual = parseFloat(seats.annualCost) || 0;
+  const entFreeCreditsPerSeat = parseFloat(seats.freeCreditsPerSeat) || 0;
+  const entOverageRate = parseFloat(seats.costPerOverageCredit) || 0;
   const entCostPerSeat = entSeats > 0 && entAnnual > 0 ? entAnnual / entSeats / 12 : null;
   const entMonthlyAllocation = entAnnual > 0 ? entAnnual / 12 : null;
+  const entMonthlyCreditPool = entSeats > 0 && entFreeCreditsPerSeat > 0 ? entFreeCreditsPerSeat * entSeats : null;
+  const entOverageExample = entOverageRate > 0 ? 1000 * entOverageRate : null;
+
+  const creditRates = computeEnterpriseCreditRates({
+    monthlyDollarAllocation: entMonthlyAllocation,
+    monthlyCreditAllocation: entMonthlyCreditPool,
+    costPerOverageCreditUsd: entOverageRate,
+  });
+  const poolValuation =
+    entMonthlyCreditPool != null && hasAnyCreditRate(creditRates)
+      ? valuateCredits(entMonthlyCreditPool, creditRates)
+      : null;
+  const poolValuationLine = poolValuation ? formatCreditValuation(poolValuation) : null;
 
   return (
     <div className="space-y-8">
@@ -50,12 +71,50 @@ export default function OpenAIEnterpriseSettingsPage() {
                 {entCostPerSeat != null ? formatUsd(entCostPerSeat) : "—"}
               </div>
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="ent-free-credits">Free credits per seat / month</Label>
+              <Input
+                id="ent-free-credits"
+                type="number"
+                step="0.01"
+                min={0}
+                value={seats.freeCreditsPerSeat}
+                onChange={(e) => seats.setFreeCreditsPerSeat(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="ent-overage-rate">Cost per overage credit (USD)</Label>
+              <Input
+                id="ent-overage-rate"
+                type="number"
+                step="0.0001"
+                min={0}
+                value={seats.costPerOverageCredit}
+                onChange={(e) => seats.setCostPerOverageCredit(e.target.value)}
+              />
+            </div>
           </div>
           {entMonthlyAllocation != null ? (
             <div className="rounded-lg border p-3 text-sm">
               <span className="text-muted-foreground">Monthly allocation: </span>
               <span className="font-semibold">{formatUsd(entMonthlyAllocation)}</span>
               <span className="text-muted-foreground"> / month</span>
+            </div>
+          ) : null}
+          {entMonthlyCreditPool != null ? (
+            <div className="rounded-lg border p-3 text-sm">
+              <span className="text-muted-foreground">Monthly credit pool: </span>
+              <span className="font-semibold">{entMonthlyCreditPool.toLocaleString()} credits</span>
+              <span className="text-muted-foreground"> / month ({entFreeCreditsPerSeat.toLocaleString()} × {entSeats} seats)</span>
+              {poolValuationLine ? (
+                <div className="mt-1 text-xs text-muted-foreground">{poolValuationLine}</div>
+              ) : null}
+            </div>
+          ) : null}
+          {entOverageExample != null ? (
+            <div className="rounded-lg border p-3 text-sm">
+              <span className="text-muted-foreground">Overage exposure example: </span>
+              <span className="font-semibold">1,000 overage credits ≈ {formatUsd(entOverageExample)}</span>
             </div>
           ) : null}
           <div className="flex items-center gap-3">
@@ -79,22 +138,26 @@ export default function OpenAIEnterpriseSettingsPage() {
             label="Credit Usage Reports (monthly CSVs)"
             endpoint="/api/import/openai-enterprise/credits"
             fieldName="file"
+            metadataEndpoint="/api/settings/enterprise-credits"
             multiple
           />
           <CsvUploadZone
             label="Users Export"
             endpoint="/api/import/openai-enterprise/users"
             fieldName="file"
+            metadataEndpoint="/api/settings/enterprise-users"
           />
           <CsvUploadZone
             label="GPTs Export"
             endpoint="/api/import/openai-enterprise/gpts"
             fieldName="file"
+            metadataEndpoint="/api/settings/enterprise-gpts"
           />
           <CsvUploadZone
             label="Projects Export"
             endpoint="/api/import/openai-enterprise/projects"
             fieldName="file"
+            metadataEndpoint="/api/settings/enterprise-projects"
           />
         </CardContent>
       </Card>

@@ -11,7 +11,18 @@ import {
   doublePrecision,
 } from "drizzle-orm/pg-core";
 
-export const sourceSystemEnum = pgEnum("source_system", ["cursor", "openai", "azure", "openai_enterprise"]);
+export const sourceSystemEnum = pgEnum("source_system", [
+  "cursor",
+  "openai",
+  "azure",
+  "openai_enterprise",
+  // Deprecated: Claude API (per-token developer product) was removed; Postgres
+  // does not support dropping enum values without recreating the type, so the
+  // value is retained here to keep the schema and DB in sync. No code path
+  // produces or queries `claude` rows.
+  "claude",
+  "claude_enterprise",
+]);
 
 export const metricKindEnum = pgEnum("metric_kind", [
   "tokens_in",
@@ -20,6 +31,7 @@ export const metricKindEnum = pgEnum("metric_kind", [
   "cost_usd",
   "dau",
   "wau",
+  "mau",
   "lines_added",
   "lines_deleted",
   "tabs_shown",
@@ -28,6 +40,9 @@ export const metricKindEnum = pgEnum("metric_kind", [
   "agent_edits_accepted",
   "agent_edits_rejected",
   "credits",
+  "sessions",
+  "commits",
+  "pull_requests",
 ]);
 
 export const connectorRunStatusEnum = pgEnum("connector_run_status", ["running", "success", "failed"]);

@@ -7,6 +7,7 @@ export default function SettingsOverviewPage() {
   const cursorSync = useSync("/api/sync/cursor");
   const openaiSync = useSync("/api/sync/openai");
   const azureSync = useSync("/api/sync/azure");
+  const claudeEnterpriseSync = useSync("/api/sync/claude-enterprise");
 
   return (
     <div className="space-y-8">
@@ -36,6 +37,13 @@ export default function SettingsOverviewPage() {
             envVar="AZURE_RESOURCES"
             apiRoute="/api/sync/azure"
             sync={azureSync}
+          />
+          <SyncCard
+            title="Claude Enterprise"
+            description="Analytics API engagement (chat, cowork, office, skills, connectors). Data has a 3-day lag and begins 2026-01-01."
+            envVar="CLAUDE_ANALYTICS_API_KEY"
+            apiRoute="/api/sync/claude-enterprise"
+            sync={claudeEnterpriseSync}
           />
         </div>
       </section>

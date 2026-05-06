@@ -9,6 +9,8 @@ export interface SeatConfig {
   seatCount?: number;
   annualCost?: number;
   billingResetDay?: number;
+  freeCreditsPerSeatPerMonth?: number;
+  costPerOverageCreditUsd?: number;
 }
 
 function seatKeyForSource(source: string): string {
@@ -51,6 +53,8 @@ export async function PUT(request: Request) {
     if (body.seatCount != null) value.seatCount = body.seatCount;
     if (body.annualCost != null) value.annualCost = body.annualCost;
     if (body.billingResetDay != null) value.billingResetDay = body.billingResetDay;
+    if (body.freeCreditsPerSeatPerMonth != null) value.freeCreditsPerSeatPerMonth = body.freeCreditsPerSeatPerMonth;
+    if (body.costPerOverageCreditUsd != null) value.costPerOverageCreditUsd = body.costPerOverageCreditUsd;
 
     await db
       .insert(dashboardSettings)

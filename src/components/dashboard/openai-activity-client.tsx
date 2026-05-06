@@ -9,7 +9,7 @@ import { KpiGrid, type KpiItem } from "@/components/dashboard/kpi-grid";
 import { TimeseriesChart } from "@/components/dashboard/timeseries-chart";
 import { DataTable } from "@/components/dashboard/data-table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCompactNumber } from "@/lib/format";
+import { formatCompactNumber, formatUsd } from "@/lib/format";
 import { computeTrend } from "@/components/dashboard/trend-badge";
 import { Disclosure } from "@/components/dashboard/disclosure";
 import type { TimeseriesRow } from "@/server/metrics";
@@ -19,17 +19,61 @@ type SummaryData = {
   requests: number;
 };
 
-type ModelRow = {
+type RankedModelRow = {
   model: string;
   requests: number;
 };
 
-const MODEL_COLUMNS: ColumnDef<ModelRow>[] = [
+type ListRateByModel = {
+  model: string;
+  listRateUsd: number;
+  billedUsd: number | null;
+  tokensIn: number;
+  tokensOut: number;
+  cachedTokens: number;
+  hasRate: boolean;
+};
+
+type ListRateResult = {
+  data: { date: string; listRateUsd: number; billedUsd: number }[];
+  byModel: ListRateByModel[];
+  unmappedModels: string[];
+  totals: { listRateUsd: number; billedUsd: number; driftPct: number | null };
+};
+
+type CombinedModelRow = RankedModelRow & {
+  listRateUsd: number;
+  hasRate: boolean;
+  tokensIn: number;
+  tokensOut: number;
+  cachedTokens: number;
+};
+
+const MODEL_COLUMNS: ColumnDef<CombinedModelRow>[] = [
   { accessorKey: "model", header: "Model" },
-  { 
-    accessorKey: "requests", 
-    header: "Requests", 
+  {
+    accessorKey: "requests",
+    header: "Requests",
     cell: (ctx) => formatCompactNumber(Number(ctx.getValue())),
+  },
+  {
+    accessorKey: "tokensIn",
+    header: "Tokens In",
+    cell: (ctx) => formatCompactNumber(Number(ctx.getValue())),
+  },
+  {
+    accessorKey: "tokensOut",
+    header: "Tokens Out",
+    cell: (ctx) => formatCompactNumber(Number(ctx.getValue())),
+  },
+  {
+    accessorKey: "listRateUsd",
+    header: "List-rate cost",
+    cell: (ctx) => {
+      const row = ctx.row.original;
+      if (!row.hasRate) return <span className="text-muted-foreground">no rate</span>;
+      return formatUsd(Number(ctx.getValue()));
+    },
   },
 ];
 
@@ -37,10 +81,12 @@ export function OpenAIActivityClient() {
   const searchParams = useSearchParams();
   const qs = searchParams.toString();
   const fullQs = qs ? `${qs}&source=openai` : `source=openai`;
+  const listRateQs = qs;
 
   const [summary, setSummary] = useState<SummaryData | null>(null);
   const [timeseries, setTimeseries] = useState<TimeseriesRow[]>([]);
-  const [models, setModels] = useState<ModelRow[]>([]);
+  const [models, setModels] = useState<RankedModelRow[]>([]);
+  const [listRate, setListRate] = useState<ListRateResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,14 +96,16 @@ export function OpenAIActivityClient() {
       setLoading(true);
       setError(null);
       try {
-        const [sumRes, tsRes, modRes] = await Promise.all([
+        const [sumRes, tsRes, modRes, listRateRes] = await Promise.all([
           fetch(`/api/metrics/summary?${fullQs}`, { cache: "no-store" }),
           fetch(`/api/metrics/timeseries?${fullQs}`, { cache: "no-store" }),
           fetch(`/api/metrics/ranked?dimension=model&${fullQs}`, { cache: "no-store" }),
+          fetch(`/api/metrics/openai-list-rate-cost?${listRateQs}`, { cache: "no-store" }),
         ]);
         const sumJson = await sumRes.json();
         const tsJson = await tsRes.json();
         const modJson = await modRes.json();
+        const listRateJson = await listRateRes.json();
 
         if (!sumRes.ok) throw new Error(sumJson.error ?? "Failed to load summary");
         if (!tsRes.ok) throw new Error(tsJson.error ?? "Failed to load timeseries");
@@ -65,7 +113,8 @@ export function OpenAIActivityClient() {
         if (!cancelled) {
           setSummary(sumJson as SummaryData);
           setTimeseries(tsJson.data as TimeseriesRow[]);
-          setModels(modJson.data as ModelRow[]);
+          setModels(modJson.data as RankedModelRow[]);
+          if (listRateRes.ok) setListRate(listRateJson as ListRateResult);
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -76,7 +125,7 @@ export function OpenAIActivityClient() {
     return () => {
       cancelled = true;
     };
-  }, [fullQs]);
+  }, [fullQs, listRateQs]);
 
   if (loading) {
     return (
@@ -123,10 +172,42 @@ export function OpenAIActivityClient() {
     },
   ];
 
+  const listRateByModel = new Map<string, ListRateByModel>();
+  for (const m of listRate?.byModel ?? []) listRateByModel.set(m.model, m);
+
+  const combinedModels: CombinedModelRow[] = models.map((m) => {
+    const lr = listRateByModel.get(m.model);
+    return {
+      model: m.model,
+      requests: m.requests,
+      tokensIn: lr?.tokensIn ?? 0,
+      tokensOut: lr?.tokensOut ?? 0,
+      cachedTokens: lr?.cachedTokens ?? 0,
+      listRateUsd: lr?.listRateUsd ?? 0,
+      hasRate: lr?.hasRate ?? false,
+    };
+  });
+
+  for (const m of listRate?.byModel ?? []) {
+    if (!combinedModels.some((c) => c.model === m.model)) {
+      combinedModels.push({
+        model: m.model,
+        requests: 0,
+        tokensIn: m.tokensIn,
+        tokensOut: m.tokensOut,
+        cachedTokens: m.cachedTokens,
+        listRateUsd: m.listRateUsd,
+        hasRate: m.hasRate,
+      });
+    }
+  }
+
+  combinedModels.sort((a, b) => b.requests - a.requests || b.listRateUsd - a.listRateUsd);
+
   return (
     <div className="space-y-6">
       <KpiGrid items={kpis} />
-      
+
       <TimeseriesChart
         title="Tokens In vs Out"
         data={timeseries}
@@ -137,9 +218,9 @@ export function OpenAIActivityClient() {
         syncId="openai-activity"
       />
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="grid gap-6">
         <Disclosure title="Model Mix" persistKey="openai-models-open">
-          <DataTable columns={MODEL_COLUMNS} data={models} />
+          <DataTable columns={MODEL_COLUMNS} data={combinedModels} />
         </Disclosure>
       </div>
     </div>

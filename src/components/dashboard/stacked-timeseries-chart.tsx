@@ -10,6 +10,7 @@ import {
   Legend,
 } from "recharts";
 import { useState } from "react";
+import { formatChartDate } from "@/lib/format";
 
 function compactTick(value: number): string {
   if (Math.abs(value) >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
@@ -56,8 +57,8 @@ export function StackedTimeseriesChart({
         <h3 className="text-sm font-semibold">{title}</h3>
         {description && <p className="text-xs text-muted-foreground">{description}</p>}
       </div>
-      <div style={{ height }}>
-        <ResponsiveContainer width="100%" height="100%">
+      <div style={{ height }} className="min-w-0">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <AreaChart 
             data={data} 
             syncId={syncId}
@@ -74,6 +75,7 @@ export function StackedTimeseriesChart({
             <XAxis
               dataKey="date"
               tick={{ fontSize: 11, fill: "var(--color-muted-foreground)" }}
+              tickFormatter={(value) => formatChartDate(String(value))}
               axisLine={false}
               tickLine={false}
               minTickGap={24}
@@ -86,12 +88,14 @@ export function StackedTimeseriesChart({
               tickFormatter={compactTick}
             />
             <Tooltip
+              wrapperStyle={{ zIndex: 50, outline: "none" }}
               contentStyle={{
                 borderRadius: 12,
-                border: "none",
-                boxShadow: "0 4px 24px rgba(0,0,0,0.1)",
-                backgroundColor: "var(--color-card)",
+                border: "1px solid var(--color-border)",
+                boxShadow: "0 8px 32px rgba(0,0,0,0.16)",
+                backgroundColor: "var(--color-popover)",
                 fontSize: 12,
+                opacity: 1,
               }}
               formatter={(value: unknown, name: unknown) => {
                 const n = typeof value === "number" ? value : Number(value);

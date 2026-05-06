@@ -2,14 +2,20 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
-import { Sparkles, Users, UserCheck, MessageCircle } from "lucide-react";
+import { Sparkles, Users, UserCheck, MessageCircle, AlertTriangle, TrendingUp } from "lucide-react";
 
 import { KpiGrid, type KpiItem } from "@/components/dashboard/kpi-grid";
 import { TimeseriesChart, type SeriesConfig } from "@/components/dashboard/timeseries-chart";
 import { StackedTimeseriesChart, type StackedSeriesConfig } from "@/components/dashboard/stacked-timeseries-chart";
 import { HorizontalBarChart } from "@/components/dashboard/horizontal-bar-chart";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCompactNumber } from "@/lib/format";
+import { formatCompactNumber, formatCredits, formatUsd } from "@/lib/format";
+import {
+  computeEnterpriseCreditRates,
+  formatCreditValuation,
+  hasAnyCreditRate,
+  valuateCredits,
+} from "@/lib/enterprise-credits";
 import { computeTrend } from "@/components/dashboard/trend-badge";
 
 type SummaryData = {
@@ -38,6 +44,19 @@ type AllocationData = {
   daysRemaining?: number;
   billingStart?: string;
   billingEnd?: string;
+  creditPoolConfigured?: boolean;
+  overageRateConfigured?: boolean;
+  freeCreditsPerSeatPerMonth?: number;
+  seatCount?: number;
+  monthlyCreditAllocation?: number;
+  creditPercentUsed?: number;
+  creditDailyBurn?: number;
+  projectedCreditMonthEnd?: number;
+  costPerOverageCreditUsd?: number;
+  overageCredits?: number;
+  overageCostUsd?: number;
+  projectedOverageCredits?: number;
+  projectedOverageCostUsd?: number;
 };
 
 type RankedMember = {
@@ -53,11 +72,6 @@ type CreditsByTypeRow = {
   credits: number;
 };
 
-function formatCredits(v: number): string {
-  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M cr`;
-  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(1)}K cr`;
-  return `${v.toFixed(1)} cr`;
-}
 
 export function OpenAIEnterpriseOverviewClient() {
   const searchParams = useSearchParams();
@@ -163,6 +177,16 @@ export function OpenAIEnterpriseOverviewClient() {
   const creditTrend = computeTrend(timeseries.map(r => r.credits ?? 0));
   const requestTrend = computeTrend(timeseries.map(r => r.requests));
 
+  const creditRates = computeEnterpriseCreditRates({
+    monthlyDollarAllocation: allocation?.monthlyAllocation,
+    monthlyCreditAllocation: allocation?.monthlyCreditAllocation,
+    costPerOverageCreditUsd: allocation?.costPerOverageCreditUsd,
+  });
+  const ratesAvailable = hasAnyCreditRate(creditRates);
+  const totalCreditsValuationLine = ratesAvailable
+    ? formatCreditValuation(valuateCredits(totalCredits, creditRates))
+    : null;
+
   const kpis: KpiItem[] = [
     {
       label: "Total Seats",
@@ -180,6 +204,7 @@ export function OpenAIEnterpriseOverviewClient() {
       icon: Sparkles,
       trend: creditTrend.changePct,
       trendLabel: "vs prev half",
+      ...(totalCreditsValuationLine ? { hint: totalCreditsValuationLine } : {}),
     },
     {
       label: "Total Requests",
@@ -200,6 +225,47 @@ export function OpenAIEnterpriseOverviewClient() {
     });
   }
 
+  if (allocation?.creditPoolConfigured && allocation.monthlyCreditAllocation) {
+    const creditPct = allocation.creditPercentUsed ?? 0;
+    const mtd = allocation.monthToDateCredits ?? 0;
+    const mtdValuationLine = ratesAvailable
+      ? formatCreditValuation(valuateCredits(mtd, creditRates))
+      : null;
+    const baseHint = `${formatCredits(mtd)} of ${formatCredits(allocation.monthlyCreditAllocation)} allowance — ${allocation.daysRemaining ?? 0} days left`;
+    kpis.push({
+      label: "Credit Allowance Used",
+      value: `${creditPct.toFixed(1)}%`,
+      hint: mtdValuationLine ? `${baseHint} · ${mtdValuationLine}` : baseHint,
+      icon: Sparkles,
+      color: creditPct >= 100 ? "var(--color-destructive)" : creditPct >= 80 ? "var(--color-chart-3)" : undefined,
+    });
+  }
+
+  if (allocation?.overageRateConfigured && (allocation.overageCredits ?? 0) > 0) {
+    kpis.push({
+      label: "Overage Cost (MTD)",
+      value: formatUsd(allocation.overageCostUsd ?? 0),
+      hint: `${formatCredits(allocation.overageCredits ?? 0)} over allowance @ ${formatUsd(allocation.costPerOverageCreditUsd ?? 0)}/credit`,
+      icon: AlertTriangle,
+      color: "var(--color-destructive)",
+    });
+  }
+
+  if (allocation?.overageRateConfigured && (allocation.projectedOverageCredits ?? 0) > 0) {
+    const projected = allocation.projectedCreditMonthEnd ?? 0;
+    const projectedValuationLine = ratesAvailable
+      ? formatCreditValuation(valuateCredits(projected, creditRates))
+      : null;
+    const baseHint = `Projected ${formatCredits(projected)} by cycle end (${formatCredits(allocation.projectedOverageCredits ?? 0)} over allowance)`;
+    kpis.push({
+      label: "Projected Overage Cost",
+      value: formatUsd(allocation.projectedOverageCostUsd ?? 0),
+      hint: projectedValuationLine ? `${baseHint} · ${projectedValuationLine}` : baseHint,
+      icon: TrendingUp,
+      color: "var(--color-destructive)",
+    });
+  }
+
   const dailyCreditSeries: SeriesConfig[] = [
     { dataKey: "credits", name: "Credits", color: "var(--color-chart-4)", type: "area", yAxisId: "left" },
   ];
@@ -217,9 +283,77 @@ export function OpenAIEnterpriseOverviewClient() {
       value: u.credits,
     }));
 
+  const creditPct = allocation?.creditPercentUsed ?? 0;
+  const creditPctClamped = Math.min(100, creditPct);
+  const showCreditPool = Boolean(
+    allocation?.creditPoolConfigured && allocation.monthlyCreditAllocation && allocation.monthlyCreditAllocation > 0,
+  );
+
   return (
     <div className="space-y-6">
       <KpiGrid items={kpis} />
+
+      {showCreditPool && allocation ? (
+        (() => {
+          const mtd = allocation.monthToDateCredits ?? 0;
+          const allowance = allocation.monthlyCreditAllocation ?? 0;
+          const remaining = Math.max(0, allowance - mtd);
+          const mtdValuation = ratesAvailable ? valuateCredits(mtd, creditRates) : null;
+          const remainingValuation = ratesAvailable ? valuateCredits(remaining, creditRates) : null;
+          const usageParts: string[] = [];
+          if (mtdValuation?.overageUsd !== undefined) {
+            usageParts.push(`≈ ${formatUsd(mtdValuation.overageUsd)} used`);
+          }
+          if (remainingValuation?.overageUsd !== undefined) {
+            usageParts.push(`${formatUsd(remainingValuation.overageUsd)} remaining at overage rate`);
+          } else if (
+            mtdValuation?.overageUsd === undefined &&
+            mtdValuation?.impliedUsd !== undefined
+          ) {
+            usageParts.push(`~ ${formatUsd(mtdValuation.impliedUsd)} contract value used`);
+          }
+          const usageLine = usageParts.join(" · ");
+
+          return (
+            <div className="rounded-2xl bg-card p-5 shadow-sm">
+              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold">Monthly credit allowance</h3>
+                  <p className="text-xs text-muted-foreground">
+                    {formatCredits(mtd)} of {formatCredits(allowance)} used · {allocation.daysRemaining ?? 0} days left in cycle
+                    {allocation.billingStart && allocation.billingEnd ? ` (${allocation.billingStart} → ${allocation.billingEnd})` : ""}
+                  </p>
+                  {usageLine ? (
+                    <p className="mt-0.5 text-xs text-muted-foreground">{usageLine}</p>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="font-semibold">{creditPct.toFixed(1)}%</span>
+                  {allocation.overageRateConfigured && (allocation.overageCostUsd ?? 0) > 0 ? (
+                    <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                      + {formatUsd(allocation.overageCostUsd ?? 0)} overage
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="h-3 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{
+                    width: `${creditPctClamped}%`,
+                    backgroundColor:
+                      creditPct >= 100
+                        ? "var(--color-destructive)"
+                        : creditPct >= 80
+                          ? "var(--color-chart-3)"
+                          : "var(--color-chart-1)",
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })()
+      ) : null}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <TimeseriesChart
@@ -250,6 +384,11 @@ export function OpenAIEnterpriseOverviewClient() {
           title="Top Users by Credits"
           data={userChartData}
           formatValue={formatCredits}
+          tooltipDetail={
+            ratesAvailable
+              ? (value) => formatCreditValuation(valuateCredits(value, creditRates))
+              : undefined
+          }
         />
       )}
     </div>

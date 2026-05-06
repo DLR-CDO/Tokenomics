@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-export const sourceSystemSchema = z.enum(["cursor", "openai", "azure", "openai_enterprise"]);
+export const sourceSystemSchema = z.enum([
+  "cursor",
+  "openai",
+  "azure",
+  "openai_enterprise",
+  "claude_enterprise",
+]);
 export type SourceSystem = z.infer<typeof sourceSystemSchema>;
 
 export const dashboardFiltersSchema = z.object({

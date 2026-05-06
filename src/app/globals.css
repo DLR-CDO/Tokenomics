@@ -128,6 +128,27 @@
   }
 }
 
+/*
+ * Hover-cursor rules. Intentionally unlayered so they win cascade over
+ * Tailwind's preflight (which leaves <button> at the UA default of `default`)
+ * and over any layered utility, while still letting :disabled / aria-disabled
+ * states fall through to `not-allowed`. <a> already gets pointer from the UA.
+ */
+button:not(:disabled):not([disabled]),
+[role="button"]:not([aria-disabled="true"]),
+summary,
+[type="checkbox"]:not(:disabled),
+[type="radio"]:not(:disabled),
+label[for]:not([data-no-pointer]) {
+  cursor: pointer;
+}
+
+button:disabled,
+button[disabled],
+[role="button"][aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
 @layer utilities {
   .no-scrollbar::-webkit-scrollbar {
     display: none;

@@ -35,6 +35,8 @@ interface SeatConfig {
   seatCount?: number;
   annualCost?: number;
   billingResetDay?: number;
+  freeCreditsPerSeatPerMonth?: number;
+  costPerOverageCreditUsd?: number;
 }
 
 /* ───── Hooks ─────────────────────────────────────────── */
@@ -108,6 +110,8 @@ export function useSeatConfig(source: string) {
   const [seatCount, setSeatCount] = useState("");
   const [annualCost, setAnnualCost] = useState("");
   const [billingResetDay, setBillingResetDay] = useState("1");
+  const [freeCreditsPerSeat, setFreeCreditsPerSeat] = useState("");
+  const [costPerOverageCredit, setCostPerOverageCredit] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -123,6 +127,8 @@ export function useSeatConfig(source: string) {
           if (c.seatCount != null) setSeatCount(String(c.seatCount));
           if (c.annualCost != null) setAnnualCost(String(c.annualCost));
           if (c.billingResetDay != null) setBillingResetDay(String(c.billingResetDay));
+          if (c.freeCreditsPerSeatPerMonth != null) setFreeCreditsPerSeat(String(c.freeCreditsPerSeatPerMonth));
+          if (c.costPerOverageCreditUsd != null) setCostPerOverageCredit(String(c.costPerOverageCreditUsd));
         }
       } catch {
         /* not configured */
@@ -141,6 +147,8 @@ export function useSeatConfig(source: string) {
       if (seatCount) body.seatCount = parseInt(seatCount, 10);
       if (annualCost) body.annualCost = parseFloat(annualCost);
       if (billingResetDay) body.billingResetDay = parseInt(billingResetDay, 10);
+      if (freeCreditsPerSeat) body.freeCreditsPerSeatPerMonth = parseFloat(freeCreditsPerSeat);
+      if (costPerOverageCredit) body.costPerOverageCreditUsd = parseFloat(costPerOverageCredit);
 
       const res = await fetch(`/api/settings/seats?source=${source}`, {
         method: "PUT",
@@ -157,7 +165,24 @@ export function useSeatConfig(source: string) {
     }
   }
 
-  return { costPerSeat, setCostPerSeat, seatCount, setSeatCount, annualCost, setAnnualCost, billingResetDay, setBillingResetDay, saving, msg, loaded, save };
+  return {
+    costPerSeat,
+    setCostPerSeat,
+    seatCount,
+    setSeatCount,
+    annualCost,
+    setAnnualCost,
+    billingResetDay,
+    setBillingResetDay,
+    freeCreditsPerSeat,
+    setFreeCreditsPerSeat,
+    costPerOverageCredit,
+    setCostPerOverageCredit,
+    saving,
+    msg,
+    loaded,
+    save,
+  };
 }
 
 export function useSync(endpoint: string) {
@@ -312,15 +337,35 @@ export function CsvUploadZone({
   endpoint,
   fieldName,
   multiple,
+  metadataEndpoint,
 }: {
   label: string;
   endpoint: string;
   fieldName: string;
   multiple?: boolean;
+  metadataEndpoint?: string;
 }) {
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [lastUpload, setLastUpload] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const refreshLastUpload = useCallback(async () => {
+    if (!metadataEndpoint) return;
+
+    try {
+      const res = await fetch(metadataEndpoint, { cache: "no-store" });
+      if (!res.ok) return;
+      const json = (await res.json()) as { importedAt?: string | null };
+      setLastUpload(json.importedAt ?? null);
+    } catch {
+      // best-effort metadata display should not block uploads
+    }
+  }, [metadataEndpoint]);
+
+  useEffect(() => {
+    void refreshLastUpload();
+  }, [refreshLastUpload]);
 
   const upload = useCallback(async () => {
     const files = fileRef.current?.files;
@@ -341,14 +386,22 @@ export function CsvUploadZone({
       if (json.rowsUpserted != null) parts.push(`${json.rowsUpserted} rows upserted`);
       if (json.membersUpserted != null) parts.push(`${json.membersUpserted} members`);
       if (json.totalRows != null) parts.push(`${json.totalRows} records`);
+      if (json.dedupedRows != null) parts.push(`${json.dedupedRows} duplicates removed`);
       if (json.filesProcessed != null) parts.push(`${json.filesProcessed} files`);
       setResult(parts.join(" · "));
+      if (json.importedAt) {
+        setLastUpload(json.importedAt as string);
+      } else {
+        await refreshLastUpload();
+      }
     } catch (e) {
       setResult(e instanceof Error ? e.message : String(e));
     } finally {
       setUploading(false);
     }
-  }, [endpoint, fieldName]);
+  }, [endpoint, fieldName, refreshLastUpload]);
+
+  const lastUploadLabel = lastUpload ? new Date(lastUpload).toLocaleString() : "Never";
 
   return (
     <div className="space-y-2">
@@ -365,6 +418,7 @@ export function CsvUploadZone({
           {uploading ? "Uploading..." : "Import"}
         </Button>
       </div>
+      {metadataEndpoint ? <p className="text-xs text-muted-foreground">Last upload: {lastUploadLabel}</p> : null}
       {result ? <p className="text-sm text-muted-foreground">{result}</p> : null}
     </div>
   );

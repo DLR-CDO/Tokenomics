@@ -20,6 +20,54 @@ const COLORS = [
   "var(--color-chart-5)",
 ];
 
+interface HorizontalBarChartProps {
+  title: string;
+  description?: string;
+  data: Record<string, unknown>[];
+  dataKey?: string;
+  nameKey?: string;
+  formatValue?: (v: number) => string;
+  height?: number;
+  /** Optional second line under the value, e.g. a USD valuation. Returning null suppresses it. */
+  tooltipDetail?: (value: number, label: string) => string | null;
+}
+
+interface TooltipPayloadItem {
+  value?: unknown;
+  payload?: Record<string, unknown>;
+}
+
+interface CustomTooltipProps {
+  active?: boolean;
+  payload?: TooltipPayloadItem[];
+  nameKey: string;
+  formatValue: (v: number) => string;
+  tooltipDetail?: (value: number, label: string) => string | null;
+}
+
+function CustomTooltip({ active, payload, nameKey, formatValue, tooltipDetail }: CustomTooltipProps) {
+  if (!active || !payload || payload.length === 0) return null;
+  const item = payload[0];
+  const raw = item?.value;
+  const numeric = typeof raw === "number" ? raw : Number(raw);
+  const valueLabel = Number.isFinite(numeric) ? formatValue(numeric) : String(raw ?? "");
+  const labelRaw = item?.payload?.[nameKey];
+  const label = typeof labelRaw === "string" ? labelRaw : String(labelRaw ?? "");
+  const detail =
+    tooltipDetail && Number.isFinite(numeric) ? tooltipDetail(numeric, label) : null;
+
+  return (
+    <div
+      className="rounded-xl bg-card p-2.5 text-xs shadow-lg"
+      style={{ boxShadow: "0 4px 24px rgba(0,0,0,0.1)" }}
+    >
+      {label ? <div className="font-medium">{label}</div> : null}
+      <div className="text-foreground">{valueLabel}</div>
+      {detail ? <div className="mt-0.5 text-muted-foreground">{detail}</div> : null}
+    </div>
+  );
+}
+
 export function HorizontalBarChart({
   title,
   description,
@@ -28,15 +76,8 @@ export function HorizontalBarChart({
   nameKey = "name",
   formatValue,
   height,
-}: {
-  title: string;
-  description?: string;
-  data: Record<string, unknown>[];
-  dataKey?: string;
-  nameKey?: string;
-  formatValue?: (v: number) => string;
-  height?: number;
-}) {
+  tooltipDetail,
+}: HorizontalBarChartProps) {
   const fmt = formatValue ?? formatUsd;
   const chartHeight = height ?? Math.max(180, data.length * 40 + 40);
 
@@ -46,8 +87,8 @@ export function HorizontalBarChart({
         <h3 className="text-sm font-semibold">{title}</h3>
         {description && <p className="text-xs text-muted-foreground">{description}</p>}
       </div>
-      <div style={{ height: chartHeight }}>
-        <ResponsiveContainer width="100%" height="100%">
+      <div style={{ height: chartHeight }} className="min-w-0">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <BarChart data={data} layout="vertical" margin={{ left: 4, right: 16, top: 4, bottom: 4 }}>
             <XAxis
               type="number"
@@ -64,17 +105,14 @@ export function HorizontalBarChart({
               width={130}
             />
             <Tooltip
-              contentStyle={{
-                borderRadius: 12,
-                border: "none",
-                boxShadow: "0 4px 24px rgba(0,0,0,0.1)",
-                backgroundColor: "var(--color-card)",
-                fontSize: 12,
-              }}
-              formatter={(value: unknown) => {
-                const n = typeof value === "number" ? value : Number(value);
-                return [Number.isFinite(n) ? fmt(n) : String(value ?? ""), ""];
-              }}
+              cursor={{ fill: "var(--color-muted)", fillOpacity: 0.2 }}
+              content={
+                <CustomTooltip
+                  nameKey={nameKey}
+                  formatValue={fmt}
+                  tooltipDetail={tooltipDetail}
+                />
+              }
             />
             <Bar dataKey={dataKey} radius={[0, 6, 6, 0]} barSize={24}>
               {data.map((_, i) => (

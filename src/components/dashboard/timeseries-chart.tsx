@@ -11,6 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import { useState } from "react";
+import { formatChartDate } from "@/lib/format";
 
 type TimeseriesRow = Record<string, unknown> & { date: string };
 
@@ -27,6 +28,7 @@ export type SeriesConfig = {
   type: "area" | "line";
   yAxisId: "left" | "right";
   color: string;
+  strokeDasharray?: string;
 };
 
 export const SERIES_PRESETS = {
@@ -80,8 +82,8 @@ export function TimeseriesChart({
           {description && <p className="text-xs text-muted-foreground">{description}</p>}
         </div>
       )}
-      <div style={{ height }}>
-        <ResponsiveContainer width="100%" height="100%">
+      <div style={{ height }} className="min-w-0">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <ComposedChart 
             data={data} 
             syncId={syncId}
@@ -99,6 +101,7 @@ export function TimeseriesChart({
               <XAxis
                 dataKey="date"
                 tick={{ fontSize: 11, fill: "var(--color-muted-foreground)" }}
+                tickFormatter={(value) => formatChartDate(String(value))}
                 axisLine={false}
                 tickLine={false}
                 minTickGap={24}
@@ -129,12 +132,14 @@ export function TimeseriesChart({
             )}
             {!compact && (
               <Tooltip
+                wrapperStyle={{ zIndex: 50, outline: "none" }}
                 contentStyle={{
                   borderRadius: 12,
-                  border: "none",
-                  boxShadow: "0 4px 24px rgba(0,0,0,0.1)",
-                  backgroundColor: "var(--color-card)",
+                  border: "1px solid var(--color-border)",
+                  boxShadow: "0 8px 32px rgba(0,0,0,0.16)",
+                  backgroundColor: "var(--color-popover)",
                   fontSize: 12,
+                  opacity: 1,
                 }}
                 formatter={(value, name) => {
                   const n = typeof value === "number" ? value : Number(value);
@@ -174,6 +179,7 @@ export function TimeseriesChart({
                   stroke={s.color}
                   dot={false}
                   strokeWidth={compact ? 2 : 2}
+                  strokeDasharray={s.strokeDasharray}
                   isAnimationActive={!compact}
                 />
               ),

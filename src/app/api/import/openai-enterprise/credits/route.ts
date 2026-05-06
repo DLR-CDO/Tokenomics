@@ -2,7 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
 import { getDb } from "@/db";
-import { dimMember, usageFacts } from "@/db/schema";
+import { dashboardSettings, dimMember, usageFacts } from "@/db/schema";
 import { parseCsv } from "@/server/csv-parse";
 
 async function resolveMemberId(
@@ -58,7 +58,9 @@ export async function POST(request: Request) {
 
     const db = getDb();
     let totalUpserted = 0;
+    let duplicateRowsWithinUpload = 0;
     const memberCache = new Map<string, string>();
+    const seenFactIds = new Set<string>();
 
     for (const file of files) {
       const text = await file.text();
@@ -76,16 +78,30 @@ export async function POST(request: Request) {
         if (!date || !email || !usageType) continue;
 
         const cacheKey = publicId || email.toLowerCase();
+        const occurredAt = new Date(`${date}T00:00:00.000Z`);
+        const creditExternalId = `oe:credit:${date}:${cacheKey}:${usageType}`;
+        const reqExternalId = `oe:qty:${date}:${cacheKey}:${usageType}`;
+
+        const shouldWriteCredits = credits !== 0;
+        const shouldWriteRequests = quantity !== 0;
+        if (!shouldWriteCredits && !shouldWriteRequests) continue;
+
+        if (
+          (shouldWriteCredits && seenFactIds.has(creditExternalId)) ||
+          (shouldWriteRequests && seenFactIds.has(reqExternalId))
+        ) {
+          duplicateRowsWithinUpload++;
+          continue;
+        }
+
         let memberId = memberCache.get(cacheKey);
         if (!memberId) {
           memberId = await resolveMemberId(db, email, name, publicId);
           memberCache.set(cacheKey, memberId);
         }
 
-        const occurredAt = new Date(`${date}T00:00:00.000Z`);
-        const externalId = `oe:credit:${date}:${cacheKey}:${usageType}`;
-
-        if (credits !== 0) {
+        if (shouldWriteCredits) {
+          seenFactIds.add(creditExternalId);
           await db
             .insert(usageFacts)
             .values({
@@ -95,7 +111,7 @@ export async function POST(request: Request) {
               amount: credits,
               memberId,
               modelName: usageType,
-              externalId,
+              externalId: creditExternalId,
               dimensionsJson: {
                 usageType,
                 quantity,
@@ -115,8 +131,8 @@ export async function POST(request: Request) {
           totalUpserted++;
         }
 
-        if (quantity !== 0) {
-          const reqExternalId = `oe:qty:${date}:${cacheKey}:${usageType}`;
+        if (shouldWriteRequests) {
+          seenFactIds.add(reqExternalId);
           await db
             .insert(usageFacts)
             .values({
@@ -147,10 +163,29 @@ export async function POST(request: Request) {
       }
     }
 
+    const importedAt = new Date().toISOString();
+    await db
+      .insert(dashboardSettings)
+      .values({
+        key: "openai_enterprise_credits",
+        value: { importedAt } as Record<string, unknown>,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [dashboardSettings.key],
+        set: {
+          value: { importedAt } as Record<string, unknown>,
+          updatedAt: new Date(),
+        },
+      });
+
     return NextResponse.json({
       ok: true,
       rowsUpserted: totalUpserted,
+      dedupedRows: duplicateRowsWithinUpload,
+      insertedOrUpdatedRows: totalUpserted,
       filesProcessed: files.length,
+      importedAt,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

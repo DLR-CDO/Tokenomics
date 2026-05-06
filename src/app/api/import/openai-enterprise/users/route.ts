@@ -1,9 +1,19 @@
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
 import { getDb } from "@/db";
 import { dashboardSettings, dimMember } from "@/db/schema";
 import { parseCsv } from "@/server/csv-parse";
+
+function normalize(value: string | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function userIdentity(user: Record<string, unknown>): string {
+  const publicId = normalize(String(user.publicId ?? user.public_id ?? ""));
+  const email = normalize(String(user.email ?? ""));
+  return publicId || email;
+}
 
 export async function POST(request: Request) {
   try {
@@ -19,7 +29,9 @@ export async function POST(request: Request) {
     const rows = parseCsv(text);
 
     let membersUpserted = 0;
-    const userData: Record<string, unknown>[] = [];
+    let duplicateRowsWithinUpload = 0;
+    let duplicateRowsAgainstExisting = 0;
+    const usersByIdentity = new Map<string, Record<string, unknown>>();
 
     for (const row of rows) {
       const email = row.email;
@@ -27,31 +39,14 @@ export async function POST(request: Request) {
 
       const publicId = row.public_id ?? "";
       const name = row.name ?? "";
-      const role = row.user_role ?? row.role ?? "";
-      const externalKey = publicId || email.toLowerCase();
+      const normalizedEmail = normalize(email);
+      const externalKey = normalize(publicId) || normalizedEmail;
+      if (!externalKey) continue;
 
-      await db
-        .insert(dimMember)
-        .values({
-          sourceSystem: "openai_enterprise",
-          externalKey,
-          displayName: name || email,
-          email: email.toLowerCase(),
-          role: role || null,
-        })
-        .onConflictDoUpdate({
-          target: [dimMember.sourceSystem, dimMember.externalKey],
-          set: {
-            displayName: name || email,
-            email: email.toLowerCase(),
-            role: role || sql`dim_member.role`,
-            updatedAt: new Date(),
-          },
-        });
-      membersUpserted++;
+      if (usersByIdentity.has(externalKey)) duplicateRowsWithinUpload++;
 
-      userData.push({
-        email: email.toLowerCase(),
+      usersByIdentity.set(externalKey, {
+        email: normalizedEmail,
         name,
         publicId,
         role: row.role ?? "",
@@ -76,17 +71,64 @@ export async function POST(request: Request) {
       });
     }
 
+    for (const [externalKey, user] of usersByIdentity.entries()) {
+      const email = String(user.email ?? "");
+      const name = String(user.name ?? "");
+      const role = String(user.userRole ?? user.role ?? "");
+
+      await db
+        .insert(dimMember)
+        .values({
+          sourceSystem: "openai_enterprise",
+          externalKey,
+          displayName: name || email,
+          email,
+          role: role || null,
+        })
+        .onConflictDoUpdate({
+          target: [dimMember.sourceSystem, dimMember.externalKey],
+          set: {
+            displayName: name || email,
+            email,
+            role: role || sql`dim_member.role`,
+            updatedAt: new Date(),
+          },
+        });
+      membersUpserted++;
+    }
+
+    const [existingRow] = await db
+      .select()
+      .from(dashboardSettings)
+      .where(eq(dashboardSettings.key, "openai_enterprise_users"))
+      .limit(1);
+
+    const existingData = existingRow?.value as { users?: Record<string, unknown>[] } | undefined;
+    const mergedUsers = new Map<string, Record<string, unknown>>();
+
+    for (const existing of existingData?.users ?? []) {
+      const key = userIdentity(existing);
+      if (!key) continue;
+      mergedUsers.set(key, existing);
+    }
+
+    for (const [key, user] of usersByIdentity.entries()) {
+      if (mergedUsers.has(key)) duplicateRowsAgainstExisting++;
+      mergedUsers.set(key, user);
+    }
+
+    const importedAt = new Date().toISOString();
     await db
       .insert(dashboardSettings)
       .values({
         key: "openai_enterprise_users",
-        value: { users: userData, importedAt: new Date().toISOString() } as Record<string, unknown>,
+        value: { users: Array.from(mergedUsers.values()), importedAt } as Record<string, unknown>,
         updatedAt: new Date(),
       })
       .onConflictDoUpdate({
         target: [dashboardSettings.key],
         set: {
-          value: { users: userData, importedAt: new Date().toISOString() } as Record<string, unknown>,
+          value: { users: Array.from(mergedUsers.values()), importedAt } as Record<string, unknown>,
           updatedAt: new Date(),
         },
       });
@@ -95,6 +137,9 @@ export async function POST(request: Request) {
       ok: true,
       membersUpserted,
       totalRows: rows.length,
+      dedupedRows: duplicateRowsWithinUpload + duplicateRowsAgainstExisting,
+      insertedOrUpdatedRows: usersByIdentity.size,
+      importedAt,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

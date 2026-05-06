@@ -11,6 +11,7 @@ const SECTIONS = [
   { id: "cursor", label: "Cursor" },
   { id: "openai-api", label: "OpenAI API" },
   { id: "openai-enterprise", label: "OpenAI Enterprise" },
+  { id: "claude-enterprise", label: "Claude Enterprise" },
   { id: "azure", label: "Azure" },
 ] as const;
 

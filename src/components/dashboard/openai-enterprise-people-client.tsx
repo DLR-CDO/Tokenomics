@@ -2,14 +2,22 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
-import { Users, UserCheck, UserMinus, Clock } from "lucide-react";
+import { Users, UserCheck, UserMinus, Clock, AlertTriangle, DollarSign } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { KpiGrid, type KpiItem } from "@/components/dashboard/kpi-grid";
 import { HorizontalBarChart } from "@/components/dashboard/horizontal-bar-chart";
 import { DataTable } from "@/components/dashboard/data-table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCompactNumber } from "@/lib/format";
+import { formatCompactNumber, formatCredits as formatCreditsBase, formatUsd } from "@/lib/format";
+import {
+  computeEnterpriseCreditRates,
+  hasAnyCreditRate,
+  valuateCredits,
+  type EnterpriseCreditRates,
+} from "@/lib/enterprise-credits";
+
+const formatCredits = (v: number): string => formatCreditsBase(v, { emptyDash: true, suffix: "" });
 
 interface CsvUser {
   email: string;
@@ -47,12 +55,65 @@ interface MergedUser {
   lastActive: string;
 }
 
-function formatCredits(v: number): string {
-  if (v === 0) return "—";
-  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
-  return v.toFixed(1);
+interface AllocationData {
+  configured: boolean;
+  creditPoolConfigured?: boolean;
+  overageRateConfigured?: boolean;
+  freeCreditsPerSeatPerMonth?: number;
+  costPerOverageCreditUsd?: number;
+  monthlyAllocation?: number;
+  monthlyCreditAllocation?: number;
+  seatCount?: number;
 }
+
+interface NameWithCreditTooltipProps {
+  name: string;
+  credits: number;
+  rates: EnterpriseCreditRates;
+  windowCaveat?: boolean;
+}
+
+function NameWithCreditTooltip({ name, credits, rates, windowCaveat }: NameWithCreditTooltipProps) {
+  const valuation = valuateCredits(credits, rates);
+  const showOverage = valuation.overageUsd !== undefined;
+  const showImplied = valuation.impliedUsd !== undefined;
+  const showAny = showOverage || showImplied;
+  const displayName = name?.trim() ? name : "—";
+
+  if (!showAny) {
+    return <span>{displayName}</span>;
+  }
+
+  return (
+    <span className="group/name relative inline-block focus-within:z-50">
+      <span tabIndex={0} className="outline-none">
+        {displayName}
+      </span>
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible absolute left-0 top-full z-50 mt-1 w-64 rounded-lg border border-border/60 bg-popover p-2 text-xs shadow-lg opacity-0 transition-opacity group-hover/name:visible group-hover/name:opacity-100 group-focus-within/name:visible group-focus-within/name:opacity-100 motion-reduce:transition-none"
+      >
+        <div className="font-medium">{formatCreditsBase(credits, { suffix: "" })} credits used</div>
+        {showOverage ? (
+          <div className="text-muted-foreground">
+            ≈ {formatUsd(valuation.overageUsd ?? 0)} if charged at overage
+          </div>
+        ) : null}
+        {showImplied ? (
+          <div className="text-muted-foreground">
+            ~ {formatUsd(valuation.impliedUsd ?? 0)} contract value
+          </div>
+        ) : null}
+        {windowCaveat ? (
+          <div className="mt-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+            for the selected window
+          </div>
+        ) : null}
+      </span>
+    </span>
+  );
+}
+
 
 function daysBetween(a: string, b: string): number | null {
   const da = new Date(a);
@@ -69,6 +130,7 @@ export function OpenAIEnterprisePeopleClient() {
 
   const [users, setUsers] = useState<MergedUser[]>([]);
   const [avgActivation, setAvgActivation] = useState<number | null>(null);
+  const [allocation, setAllocation] = useState<AllocationData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -76,13 +138,15 @@ export function OpenAIEnterprisePeopleClient() {
     (async () => {
       setLoading(true);
       try {
-        const [settingsRes, rosterRes] = await Promise.all([
+        const [settingsRes, rosterRes, allocRes] = await Promise.all([
           fetch("/api/settings/enterprise-users", { cache: "no-store" }),
           fetch(`/api/metrics/ranked?dimension=member&${fullQs}`, { cache: "no-store" }),
+          fetch(`/api/metrics/monthly-allocation?source=${source}`, { cache: "no-store" }),
         ]);
 
         const settingsJson = settingsRes.ok ? await settingsRes.json() : null;
         const rosterJson = await rosterRes.json();
+        const allocJson = allocRes.ok ? await allocRes.json() : null;
 
         if (cancelled) return;
 
@@ -147,6 +211,7 @@ export function OpenAIEnterprisePeopleClient() {
             ? Math.round(activationDays.reduce((s, d) => s + d, 0) / activationDays.length)
             : null,
         );
+        if (allocJson) setAllocation(allocJson as AllocationData);
       } catch {
         /* empty */
       } finally {
@@ -154,7 +219,7 @@ export function OpenAIEnterprisePeopleClient() {
       }
     })();
     return () => { cancelled = true; };
-  }, [fullQs]);
+  }, [fullQs, source]);
 
   const roleDistribution = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -180,6 +245,30 @@ export function OpenAIEnterprisePeopleClient() {
   const activeUsers = users.filter(u => u.status === "enabled").length;
   const pendingUsers = users.filter(u => u.status === "pending").length;
 
+  const allowance =
+    allocation?.creditPoolConfigured && (allocation.freeCreditsPerSeatPerMonth ?? 0) > 0
+      ? (allocation.freeCreditsPerSeatPerMonth ?? 0)
+      : null;
+  const overageRate =
+    allocation?.overageRateConfigured && (allocation.costPerOverageCreditUsd ?? 0) > 0
+      ? (allocation.costPerOverageCreditUsd ?? 0)
+      : null;
+
+  const overQuotaCount = allowance != null ? users.filter((u) => u.credits > allowance).length : 0;
+  const totalUserOverage =
+    allowance != null && overageRate != null
+      ? users.reduce((sum, u) => sum + Math.max(0, u.credits - allowance) * overageRate, 0)
+      : 0;
+
+  const creditRates = computeEnterpriseCreditRates({
+    monthlyDollarAllocation: allocation?.monthlyAllocation,
+    monthlyCreditAllocation: allocation?.monthlyCreditAllocation,
+    costPerOverageCreditUsd: allocation?.costPerOverageCreditUsd,
+  });
+  const ratesAvailable = hasAnyCreditRate(creditRates);
+  const datePreset = searchParams.get("datePreset");
+  const windowCaveat = ratesAvailable && datePreset !== null && datePreset !== "cycle";
+
   const kpis: KpiItem[] = [
     { label: "Total Members", value: String(totalUsers), icon: Users },
     { label: "Active", value: String(activeUsers), icon: UserCheck },
@@ -194,8 +283,39 @@ export function OpenAIEnterprisePeopleClient() {
     });
   }
 
+  if (allowance != null) {
+    kpis.push({
+      label: "Over-quota",
+      value: String(overQuotaCount),
+      hint: `Members above ${formatCompactNumber(allowance)} credits / month allowance`,
+      icon: AlertTriangle,
+      color: overQuotaCount > 0 ? "var(--color-destructive)" : undefined,
+    });
+  }
+
+  if (overageRate != null && totalUserOverage > 0) {
+    kpis.push({
+      label: "User-level overage",
+      value: formatUsd(totalUserOverage),
+      hint: `Sum of per-user credits above allowance × ${formatUsd(overageRate)}/credit. Chargeback view; actual billing pools at the org level.`,
+      icon: DollarSign,
+      color: "var(--color-destructive)",
+    });
+  }
+
   const USER_COLUMNS: ColumnDef<MergedUser, unknown>[] = [
-    { accessorKey: "name", header: "Name" },
+    {
+      accessorKey: "name",
+      header: "Name",
+      cell: ({ row }) => (
+        <NameWithCreditTooltip
+          name={row.original.name}
+          credits={row.original.credits}
+          rates={creditRates}
+          windowCaveat={windowCaveat}
+        />
+      ),
+    },
     { accessorKey: "email", header: "Email" },
     {
       accessorKey: "status",
@@ -226,6 +346,40 @@ export function OpenAIEnterprisePeopleClient() {
       accessorKey: "credits",
       header: "Credits",
       cell: ({ getValue }) => formatCredits(Number(getValue())),
+    },
+    {
+      id: "allowancePct",
+      header: "% of allowance",
+      accessorFn: (row) => (allowance != null && allowance > 0 ? (row.credits / allowance) * 100 : -1),
+      cell: ({ row }) => {
+        if (allowance == null || allowance <= 0) {
+          return <span className="text-muted-foreground">—</span>;
+        }
+        const pct = (row.original.credits / allowance) * 100;
+        const cls =
+          pct >= 100
+            ? "text-destructive font-semibold"
+            : pct >= 80
+              ? "text-amber-600 dark:text-amber-400 font-medium"
+              : "text-muted-foreground";
+        return <span className={cls}>{pct.toFixed(0)}%</span>;
+      },
+    },
+    {
+      id: "overageCost",
+      header: "Overage cost",
+      accessorFn: (row) =>
+        allowance != null && overageRate != null
+          ? Math.max(0, row.credits - allowance) * overageRate
+          : -1,
+      cell: ({ row }) => {
+        if (allowance == null || overageRate == null) {
+          return <span className="text-muted-foreground">—</span>;
+        }
+        const cost = Math.max(0, row.original.credits - allowance) * overageRate;
+        if (cost <= 0) return <span className="text-muted-foreground">—</span>;
+        return <span className="font-medium text-destructive">{formatUsd(cost)}</span>;
+      },
     },
     {
       accessorKey: "gptMessages",

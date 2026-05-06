@@ -3,31 +3,19 @@ import { NextResponse } from "next/server";
 
 import { getDb } from "@/db";
 import { dashboardSettings, usageFacts } from "@/db/schema";
+import { getBillingWindow } from "@/server/billing-window";
 
 interface SeatConfig {
   costPerSeatPerMonth?: number;
   seatCount?: number;
   annualCost?: number;
   billingResetDay?: number;
+  freeCreditsPerSeatPerMonth?: number;
+  costPerOverageCreditUsd?: number;
 }
 
-function getBillingWindow(resetDay: number, now: Date): { start: Date; end: Date } {
-  const year = now.getFullYear();
-  const month = now.getMonth();
-
-  let start: Date;
-  let end: Date;
-
-  if (now.getDate() >= resetDay) {
-    start = new Date(Date.UTC(year, month, resetDay));
-    end = new Date(Date.UTC(year, month + 1, resetDay - 1, 23, 59, 59, 999));
-  } else {
-    start = new Date(Date.UTC(year, month - 1, resetDay));
-    end = new Date(Date.UTC(year, month, resetDay - 1, 23, 59, 59, 999));
-  }
-
-  return { start, end };
-}
+type SourceSystem = "cursor" | "openai" | "azure" | "openai_enterprise" | "claude_enterprise";
+type MetricKind = "credits" | "cost_usd";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -50,28 +38,40 @@ export async function GET(request: Request) {
     const config = seatRow.value as unknown as SeatConfig;
     const now = new Date();
 
-    let monthlyAllocation: number;
+    const isEnterprise = source === "openai_enterprise";
+    const dollarPoolConfigured = isEnterprise
+      ? Boolean(config.annualCost && config.annualCost > 0)
+      : Boolean(config.costPerSeatPerMonth && config.seatCount);
+    const creditPoolConfigured = isEnterprise
+      ? Boolean(
+          config.freeCreditsPerSeatPerMonth &&
+            config.freeCreditsPerSeatPerMonth > 0 &&
+            config.seatCount &&
+            config.seatCount > 0,
+        )
+      : false;
+    const overageRateConfigured = isEnterprise
+      ? creditPoolConfigured && Boolean(config.costPerOverageCreditUsd && config.costPerOverageCreditUsd > 0)
+      : false;
+
+    if (!dollarPoolConfigured && !creditPoolConfigured) {
+      return NextResponse.json({ configured: false });
+    }
+
     let billingStart: Date;
     let billingEnd: Date;
 
-    if (source === "openai_enterprise") {
-      if (!config.annualCost) return NextResponse.json({ configured: false });
-
-      monthlyAllocation = config.annualCost / 12;
+    if (isEnterprise) {
       const resetDay = config.billingResetDay ?? 1;
       const window = getBillingWindow(resetDay, now);
       billingStart = window.start;
       billingEnd = window.end;
     } else {
-      if (!config.costPerSeatPerMonth || !config.seatCount) {
-        return NextResponse.json({ configured: false });
-      }
-      monthlyAllocation = config.costPerSeatPerMonth * config.seatCount;
       billingStart = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1));
       billingEnd = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999));
     }
 
-    const metricKind = source === "openai_enterprise" ? "credits" : "cost_usd";
+    const metricKind: MetricKind = isEnterprise ? "credits" : "cost_usd";
 
     const [usage] = await db
       .select({
@@ -80,15 +80,14 @@ export async function GET(request: Request) {
       .from(usageFacts)
       .where(
         and(
-          eq(usageFacts.sourceSystem, source as "cursor" | "openai" | "openai_enterprise"),
-          eq(usageFacts.metricKind, metricKind as any),
+          eq(usageFacts.sourceSystem, source as SourceSystem),
+          eq(usageFacts.metricKind, metricKind),
           gte(usageFacts.occurredAt, billingStart),
           lte(usageFacts.occurredAt, billingEnd),
         ),
       );
 
     const monthToDate = Number(usage?.total ?? 0);
-    const percentUsed = monthlyAllocation > 0 ? (monthToDate / monthlyAllocation) * 100 : 0;
 
     const msRemaining = billingEnd.getTime() - now.getTime();
     const daysRemaining = Math.max(0, Math.ceil(msRemaining / (24 * 60 * 60 * 1000)));
@@ -98,7 +97,14 @@ export async function GET(request: Request) {
     const dailyBurn = daysElapsed > 0 ? monthToDate / daysElapsed : 0;
     const projectedMonthEnd = dailyBurn * totalDays;
 
-    return NextResponse.json({
+    const monthlyAllocation = dollarPoolConfigured
+      ? isEnterprise
+        ? (config.annualCost ?? 0) / 12
+        : (config.costPerSeatPerMonth ?? 0) * (config.seatCount ?? 0)
+      : 0;
+    const percentUsed = monthlyAllocation > 0 ? (monthToDate / monthlyAllocation) * 100 : 0;
+
+    const baseResponse: Record<string, unknown> = {
       configured: true,
       source,
       monthlyAllocation,
@@ -111,7 +117,42 @@ export async function GET(request: Request) {
       projectedMonthEnd,
       billingStart: billingStart.toISOString().slice(0, 10),
       billingEnd: billingEnd.toISOString().slice(0, 10),
-    });
+      creditPoolConfigured,
+      overageRateConfigured,
+    };
+
+    if (creditPoolConfigured) {
+      const freeCreditsPerSeatPerMonth = config.freeCreditsPerSeatPerMonth ?? 0;
+      const seatCount = config.seatCount ?? 0;
+      const monthlyCreditAllocation = freeCreditsPerSeatPerMonth * seatCount;
+      const creditPercentUsed =
+        monthlyCreditAllocation > 0 ? (monthToDate / monthlyCreditAllocation) * 100 : 0;
+      const creditDailyBurn = daysElapsed > 0 ? monthToDate / daysElapsed : 0;
+      const projectedCreditMonthEnd = creditDailyBurn * totalDays;
+
+      baseResponse.freeCreditsPerSeatPerMonth = freeCreditsPerSeatPerMonth;
+      baseResponse.seatCount = seatCount;
+      baseResponse.monthlyCreditAllocation = monthlyCreditAllocation;
+      baseResponse.creditPercentUsed = creditPercentUsed;
+      baseResponse.creditDailyBurn = creditDailyBurn;
+      baseResponse.projectedCreditMonthEnd = projectedCreditMonthEnd;
+
+      if (overageRateConfigured) {
+        const costPerOverageCreditUsd = config.costPerOverageCreditUsd ?? 0;
+        const overageCredits = Math.max(0, monthToDate - monthlyCreditAllocation);
+        const overageCostUsd = overageCredits * costPerOverageCreditUsd;
+        const projectedOverageCredits = Math.max(0, projectedCreditMonthEnd - monthlyCreditAllocation);
+        const projectedOverageCostUsd = projectedOverageCredits * costPerOverageCreditUsd;
+
+        baseResponse.costPerOverageCreditUsd = costPerOverageCreditUsd;
+        baseResponse.overageCredits = overageCredits;
+        baseResponse.overageCostUsd = overageCostUsd;
+        baseResponse.projectedOverageCredits = projectedOverageCredits;
+        baseResponse.projectedOverageCostUsd = projectedOverageCostUsd;
+      }
+    }
+
+    return NextResponse.json(baseResponse);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: 500 });
