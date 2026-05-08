@@ -4,6 +4,8 @@ import { NextResponse } from "next/server";
 import { getDb } from "@/db";
 import { dashboardSettings } from "@/db/schema";
 
+export type ClaudePlanType = "seat_based" | "usage_based";
+
 export interface SeatConfig {
   costPerSeatPerMonth?: number;
   seatCount?: number;
@@ -11,6 +13,17 @@ export interface SeatConfig {
   billingResetDay?: number;
   freeCreditsPerSeatPerMonth?: number;
   costPerOverageCreditUsd?: number;
+  /**
+   * Claude Enterprise plan structure. Controls how cost data from the new
+   * Anthropic Analytics API rolls up into the global overview/forecast:
+   *   - seat_based: contract pricing is the base; API cost_usd is additive
+   *     overage. (Per Anthropic: "these endpoints will reflect extra usage
+   *     only" on seat-based plans.)
+   *   - usage_based: API cost_usd is authoritative; the prorated-seat math
+   *     is dropped from the rollup.
+   * Defaults to "seat_based" everywhere it isn't set.
+   */
+  planType?: ClaudePlanType;
 }
 
 function seatKeyForSource(source: string): string {
@@ -55,6 +68,7 @@ export async function PUT(request: Request) {
     if (body.billingResetDay != null) value.billingResetDay = body.billingResetDay;
     if (body.freeCreditsPerSeatPerMonth != null) value.freeCreditsPerSeatPerMonth = body.freeCreditsPerSeatPerMonth;
     if (body.costPerOverageCreditUsd != null) value.costPerOverageCreditUsd = body.costPerOverageCreditUsd;
+    if (body.planType === "seat_based" || body.planType === "usage_based") value.planType = body.planType;
 
     await db
       .insert(dashboardSettings)

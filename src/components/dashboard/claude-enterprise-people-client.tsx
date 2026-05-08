@@ -16,7 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { KpiGrid, type KpiItem } from "@/components/dashboard/kpi-grid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatCompactNumber } from "@/lib/format";
+import { formatCompactNumber, formatUsd } from "@/lib/format";
 import type { EnhancedMemberRow } from "@/server/metrics";
 
 export function ClaudeEnterprisePeopleClient() {
@@ -74,6 +74,36 @@ export function ClaudeEnterprisePeopleClient() {
         cell: (ctx) => formatCompactNumber(Number(ctx.getValue())),
       },
       {
+        // Tokens + USD spend come from the new Anthropic cost+usage API.
+        // Will read 0 for users who have only engagement activity (no API
+        // cost) or until the cost endpoints are enabled.
+        id: "tokensTotal",
+        header: "Tokens",
+        accessorFn: (row) => Number(row.tokensIn ?? 0) + Number(row.tokensOut ?? 0),
+        cell: (ctx) => formatCompactNumber(Number(ctx.getValue())),
+        sortingFn: "basic",
+      },
+      {
+        accessorKey: "windowSpendUsd",
+        header: "USD spend",
+        cell: (ctx) => {
+          const v = Number(ctx.getValue() ?? 0);
+          if (v <= 0) return "—";
+          return (
+            <div className="flex items-center gap-2">
+              <span>{formatUsd(v)}</span>
+              <span
+                className="rounded-full border border-amber-300/50 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:border-amber-500/30 dark:bg-amber-950/30 dark:text-amber-300"
+                title="This user consumed Prepaid Extra Usage this window"
+              >
+                Extras
+              </span>
+            </div>
+          );
+        },
+        sortingFn: "basic",
+      },
+      {
         accessorKey: "linesAdded",
         header: "Lines +",
         cell: (ctx) => formatCompactNumber(Number(ctx.getValue())),
@@ -87,7 +117,7 @@ export function ClaudeEnterprisePeopleClient() {
     [],
   );
 
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [sorting, setSorting] = useState<SortingState>([{ id: "windowSpendUsd", desc: true }]);
 
   const table = useReactTable({
     data: members,

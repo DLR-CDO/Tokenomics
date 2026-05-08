@@ -30,6 +30,8 @@ interface BudgetMetrics {
   daysRemainingInContract: number;
 }
 
+type ClaudePlanType = "seat_based" | "usage_based";
+
 interface SeatConfig {
   costPerSeatPerMonth?: number;
   seatCount?: number;
@@ -37,6 +39,7 @@ interface SeatConfig {
   billingResetDay?: number;
   freeCreditsPerSeatPerMonth?: number;
   costPerOverageCreditUsd?: number;
+  planType?: ClaudePlanType;
 }
 
 /* ───── Hooks ─────────────────────────────────────────── */
@@ -112,6 +115,7 @@ export function useSeatConfig(source: string) {
   const [billingResetDay, setBillingResetDay] = useState("1");
   const [freeCreditsPerSeat, setFreeCreditsPerSeat] = useState("");
   const [costPerOverageCredit, setCostPerOverageCredit] = useState("");
+  const [planType, setPlanType] = useState<ClaudePlanType>("seat_based");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -129,6 +133,7 @@ export function useSeatConfig(source: string) {
           if (c.billingResetDay != null) setBillingResetDay(String(c.billingResetDay));
           if (c.freeCreditsPerSeatPerMonth != null) setFreeCreditsPerSeat(String(c.freeCreditsPerSeatPerMonth));
           if (c.costPerOverageCreditUsd != null) setCostPerOverageCredit(String(c.costPerOverageCreditUsd));
+          if (c.planType === "seat_based" || c.planType === "usage_based") setPlanType(c.planType);
         }
       } catch {
         /* not configured */
@@ -149,6 +154,7 @@ export function useSeatConfig(source: string) {
       if (billingResetDay) body.billingResetDay = parseInt(billingResetDay, 10);
       if (freeCreditsPerSeat) body.freeCreditsPerSeatPerMonth = parseFloat(freeCreditsPerSeat);
       if (costPerOverageCredit) body.costPerOverageCreditUsd = parseFloat(costPerOverageCredit);
+      body.planType = planType;
 
       const res = await fetch(`/api/settings/seats?source=${source}`, {
         method: "PUT",
@@ -178,6 +184,8 @@ export function useSeatConfig(source: string) {
     setFreeCreditsPerSeat,
     costPerOverageCredit,
     setCostPerOverageCredit,
+    planType,
+    setPlanType,
     saving,
     msg,
     loaded,

@@ -6,11 +6,14 @@ import { connectorRuns, dashboardSettings, dimMember, usageFacts } from "@/db/sc
 import {
   createClaudeAnalyticsClient,
   ClaudeAnalyticsError,
+  parseFractionalCentUsd,
+  chunkRange31d,
   type AnalyticsConnector,
   type AnalyticsProject,
   type AnalyticsSkill,
   type AnalyticsSummary,
   type AnalyticsUser,
+  type CostUsageProduct,
 } from "./claude-analytics-client";
 import {
   CLAUDE_ANALYTICS_DATA_FLOOR,
@@ -24,6 +27,7 @@ type MetricKind =
   | "tokens_in"
   | "tokens_out"
   | "requests"
+  | "cost_usd"
   | "sessions"
   | "commits"
   | "pull_requests"
@@ -37,6 +41,18 @@ type MetricKind =
 
 const SOURCE = "claude_enterprise" as const;
 const SEAT_SNAPSHOT_KEY = "claude_enterprise_seat_snapshot";
+
+/**
+ * The cost+usage endpoints are still in beta and only return data for
+ * dates >= 2026-01-01. Sync stages that hit them are gated behind this
+ * env flag so we can ship the stages dark and flip them on per-env after
+ * the recon probe confirms access. Any value other than "false"/"0"/""
+ * counts as enabled.
+ */
+function costEndpointsEnabled(): boolean {
+  const raw = (process.env.CLAUDE_COST_ENDPOINTS_ENABLED ?? "true").trim().toLowerCase();
+  return raw !== "false" && raw !== "0" && raw !== "";
+}
 
 async function upsertMemberRow(
   externalKey: string,
@@ -643,6 +659,336 @@ async function syncAnalyticsConnectors(dates: string[]): Promise<number> {
   return count;
 }
 
+/* ---------- Analytics: per-user cost (daily) ---------- */
+
+/**
+ * For each date, query `/user_cost_report` grouped by product so we can
+ * upsert one cost_usd fact per (user, product, day). The endpoint itself
+ * aggregates across the entire window, so per-day granularity comes from
+ * issuing one query per day.
+ *
+ * External-id namespace: `claude_enterprise:cost:user:<userId>:<product>:<date>`.
+ * This is disjoint from the engagement facts (e.g. `claude_enterprise:chat:...`),
+ * so re-syncing engagement never overwrites cost facts and vice versa.
+ *
+ * `dimensionsJson.listAmountUsd` carries the pre-discount list price for
+ * reconciliation in the Spend page banner.
+ */
+async function syncAnalyticsUserCost(dates: string[]): Promise<number> {
+  const client = createClaudeAnalyticsClient();
+  let count = 0;
+
+  for (const date of dates) {
+    const startingAt = `${date}T00:00:00.000Z`;
+    const endingAt = `${date}T23:59:59.999Z`;
+    const occurredAt = new Date(startingAt);
+
+    type CostRow = {
+      actor: { user_id: string; email: string | null };
+      product: CostUsageProduct | null;
+      amount: string;
+      list_amount: string;
+      requests?: number;
+    };
+    const rows: CostRow[] = [];
+    try {
+      for await (const r of client.listUserCostReport({
+        startingAt,
+        endingAt,
+        groupBy: ["product"],
+        excludeDeletedUsers: false,
+        orderBy: "amount",
+      })) {
+        rows.push(r as CostRow);
+      }
+    } catch (e) {
+      if (e instanceof ClaudeAnalyticsError && e.status === 400) continue;
+      throw e;
+    }
+
+    for (const row of rows) {
+      const userId = row.actor?.user_id;
+      const product = row.product ?? "unknown";
+      const usd = parseFractionalCentUsd(row.amount);
+      const listUsd = parseFractionalCentUsd(row.list_amount);
+      if (!userId) continue;
+      // Skip true zero rows — keeps the table clean and the Spend page from
+      // counting empty (user, product, day) tuples toward "active spenders".
+      if (usd === 0 && listUsd === 0) continue;
+
+      const email = row.actor?.email ?? null;
+      const memberId = await upsertMemberRow(`user:${userId}`, email, email);
+
+      await upsertFact({
+        occurredAt,
+        metricKind: "cost_usd",
+        amount: usd,
+        memberId,
+        modelName: null,
+        mode: product,
+        dimensionsJson: {
+          endpoint: "user_cost_report",
+          product,
+          listAmountUsd: listUsd,
+          requests: row.requests ?? 0,
+        },
+        externalId: `claude_enterprise:cost:user:${userId}:${product}:${date}`,
+      });
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+/* ---------- Analytics: per-user tokens (daily) ---------- */
+
+async function syncAnalyticsUserUsage(dates: string[]): Promise<number> {
+  const client = createClaudeAnalyticsClient();
+  let count = 0;
+
+  for (const date of dates) {
+    const startingAt = `${date}T00:00:00.000Z`;
+    const endingAt = `${date}T23:59:59.999Z`;
+    const occurredAt = new Date(startingAt);
+
+    type UsageRow = {
+      actor: { user_id: string; email: string | null };
+      product: CostUsageProduct | null;
+      uncached_input_tokens?: number;
+      cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number };
+      cache_read_input_tokens?: number;
+      output_tokens?: number;
+      requests?: number;
+      server_tool_use?: { web_search_requests?: number };
+    };
+    const rows: UsageRow[] = [];
+    try {
+      for await (const r of client.listUserUsageReport({
+        startingAt,
+        endingAt,
+        groupBy: ["product"],
+        excludeDeletedUsers: false,
+        orderBy: "total_tokens",
+      })) {
+        rows.push(r as UsageRow);
+      }
+    } catch (e) {
+      if (e instanceof ClaudeAnalyticsError && e.status === 400) continue;
+      throw e;
+    }
+
+    for (const row of rows) {
+      const userId = row.actor?.user_id;
+      const product = row.product ?? "unknown";
+      if (!userId) continue;
+
+      // Sum all input-token components into tokens_in. Cache-write tokens
+      // (5m + 1h) are billable input tokens too — the Anthropic spec lists
+      // them under cache_creation but they belong on the input side.
+      const tokensIn =
+        Number(row.uncached_input_tokens ?? 0) +
+        Number(row.cache_read_input_tokens ?? 0) +
+        Number(row.cache_creation?.ephemeral_5m_input_tokens ?? 0) +
+        Number(row.cache_creation?.ephemeral_1h_input_tokens ?? 0);
+      const tokensOut = Number(row.output_tokens ?? 0);
+      const requests = Number(row.requests ?? 0);
+      if (tokensIn === 0 && tokensOut === 0 && requests === 0) continue;
+
+      const email = row.actor?.email ?? null;
+      const memberId = await upsertMemberRow(`user:${userId}`, email, email);
+
+      // Cache-aware input breakdown lives on dimensionsJson so the Tokens
+      // page can compute cache hit rate without re-reading the API.
+      const dims = {
+        endpoint: "user_usage_report",
+        product,
+        uncachedInput: Number(row.uncached_input_tokens ?? 0),
+        cacheRead: Number(row.cache_read_input_tokens ?? 0),
+        cacheCreate5m: Number(row.cache_creation?.ephemeral_5m_input_tokens ?? 0),
+        cacheCreate1h: Number(row.cache_creation?.ephemeral_1h_input_tokens ?? 0),
+        webSearchRequests: Number(row.server_tool_use?.web_search_requests ?? 0),
+      };
+
+      if (tokensIn > 0) {
+        await upsertFact({
+          occurredAt,
+          metricKind: "tokens_in",
+          amount: tokensIn,
+          memberId,
+          modelName: null,
+          mode: product,
+          dimensionsJson: dims,
+          externalId: `claude_enterprise:tokens:user:${userId}:${product}:${date}:in`,
+        });
+        count += 1;
+      }
+      if (tokensOut > 0) {
+        await upsertFact({
+          occurredAt,
+          metricKind: "tokens_out",
+          amount: tokensOut,
+          memberId,
+          modelName: null,
+          mode: product,
+          dimensionsJson: dims,
+          externalId: `claude_enterprise:tokens:user:${userId}:${product}:${date}:out`,
+        });
+        count += 1;
+      }
+      if (requests > 0) {
+        // Disjoint external-id from engagement `requests` (e.g.
+        // `claude_enterprise:chat:...:requests`) so the two sources never
+        // collide when summed.
+        await upsertFact({
+          occurredAt,
+          metricKind: "requests",
+          amount: requests,
+          memberId,
+          modelName: null,
+          mode: product,
+          dimensionsJson: dims,
+          externalId: `claude_enterprise:cost_endpoint:user:${userId}:${product}:${date}:requests`,
+        });
+        count += 1;
+      }
+    }
+  }
+
+  return count;
+}
+
+/* ---------- Analytics: per-product / per-model daily cost buckets ---------- */
+
+/**
+ * Two `cost_report` queries per ≤31-day window (bucket_width=1d):
+ *   - group_by=product → per-product daily totals (canonical for global rollup).
+ *   - group_by=model   → per-model daily totals (used by Spend page's "Top models").
+ *
+ * Stored under `mode="<product|model_name>"` with `memberId=null`.
+ *
+ * ExternalId namespace is split between the two so the global rollup
+ * (`claude_enterprise:cost:bucket:product:%`) doesn't double-count by also
+ * matching the model bucket facts.
+ */
+async function syncAnalyticsCostBucketed(startDate: string, endDate: string): Promise<number> {
+  const client = createClaudeAnalyticsClient();
+  let count = 0;
+
+  // ending_at is exclusive in the API; pad by 1 day so the endDate's bucket
+  // is included.
+  const startIso = `${startDate}T00:00:00.000Z`;
+  const endIsoExclusive = new Date(
+    new Date(`${endDate}T00:00:00.000Z`).getTime() + 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  for (const window of chunkRange31d(startIso, endIsoExclusive)) {
+    // ---- Per-product buckets (canonical for global rollup) ----
+    let productBuckets: Array<{
+      starting_at: string;
+      results: Array<{ product: CostUsageProduct | null; amount: string; list_amount: string }>;
+    }> = [];
+    try {
+      for await (const b of client.listCostReport({
+        startingAt: window.startingAt,
+        endingAt: window.endingAt,
+        bucketWidth: "1d",
+        groupBy: ["product"],
+      })) {
+        productBuckets.push(b as typeof productBuckets[number]);
+      }
+    } catch (e) {
+      if (e instanceof ClaudeAnalyticsError && e.status === 400) {
+        productBuckets = [];
+      } else {
+        throw e;
+      }
+    }
+
+    for (const bucket of productBuckets) {
+      const day = bucket.starting_at.slice(0, 10);
+      const occurredAt = new Date(`${day}T00:00:00.000Z`);
+      for (const r of bucket.results ?? []) {
+        const product = r.product ?? "unknown";
+        const usd = parseFractionalCentUsd(r.amount);
+        const listUsd = parseFractionalCentUsd(r.list_amount);
+        if (usd === 0 && listUsd === 0) continue;
+
+        await upsertFact({
+          occurredAt,
+          metricKind: "cost_usd",
+          amount: usd,
+          memberId: null,
+          modelName: null,
+          mode: product,
+          dimensionsJson: {
+            endpoint: "cost_report",
+            groupBy: "product",
+            product,
+            listAmountUsd: listUsd,
+            bucketWidth: "1d",
+          },
+          externalId: `claude_enterprise:cost:bucket:product:${product}:${day}`,
+        });
+        count += 1;
+      }
+    }
+
+    // ---- Per-model buckets (Spend page's Top Models view) ----
+    let modelBuckets: Array<{
+      starting_at: string;
+      results: Array<{ model: string | null; amount: string; list_amount: string }>;
+    }> = [];
+    try {
+      for await (const b of client.listCostReport({
+        startingAt: window.startingAt,
+        endingAt: window.endingAt,
+        bucketWidth: "1d",
+        groupBy: ["model"],
+      })) {
+        modelBuckets.push(b as typeof modelBuckets[number]);
+      }
+    } catch (e) {
+      if (e instanceof ClaudeAnalyticsError && e.status === 400) {
+        modelBuckets = [];
+      } else {
+        throw e;
+      }
+    }
+
+    for (const bucket of modelBuckets) {
+      const day = bucket.starting_at.slice(0, 10);
+      const occurredAt = new Date(`${day}T00:00:00.000Z`);
+      for (const r of bucket.results ?? []) {
+        const model = r.model ?? "unknown";
+        const usd = parseFractionalCentUsd(r.amount);
+        const listUsd = parseFractionalCentUsd(r.list_amount);
+        if (usd === 0 && listUsd === 0) continue;
+
+        await upsertFact({
+          occurredAt,
+          metricKind: "cost_usd",
+          amount: usd,
+          memberId: null,
+          modelName: model,
+          mode: null,
+          dimensionsJson: {
+            endpoint: "cost_report",
+            groupBy: "model",
+            model,
+            listAmountUsd: listUsd,
+            bucketWidth: "1d",
+          },
+          externalId: `claude_enterprise:cost:bucket:model:${model}:${day}`,
+        });
+        count += 1;
+      }
+    }
+  }
+
+  return count;
+}
+
 /* ---------- Orchestrator ---------- */
 
 export interface ClaudeEnterpriseSyncResult {
@@ -715,6 +1061,12 @@ export async function syncClaudeEnterpriseData(): Promise<ClaudeEnterpriseSyncRe
     await runResource("analytics.chat_projects", () => syncAnalyticsProjects(dates));
     await runResource("analytics.skills", () => syncAnalyticsSkills(dates));
     await runResource("analytics.connectors", () => syncAnalyticsConnectors(dates));
+
+    if (costEndpointsEnabled()) {
+      await runResource("analytics.user_cost", () => syncAnalyticsUserCost(dates));
+      await runResource("analytics.user_usage", () => syncAnalyticsUserUsage(dates));
+      await runResource("analytics.cost_bucketed", () => syncAnalyticsCostBucketed(startDate, endDate));
+    }
 
     if (runId) {
       if (errors.length > 0) {

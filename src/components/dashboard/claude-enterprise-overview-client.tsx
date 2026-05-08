@@ -2,10 +2,21 @@
 
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Users, UserCheck, MessageCircle, GitCommit, GitPullRequest, Code2 } from "lucide-react";
+import {
+  Users,
+  UserCheck,
+  MessageCircle,
+  GitCommit,
+  GitPullRequest,
+  Code2,
+  TrendingUp,
+  Flame,
+  CalendarClock,
+} from "lucide-react";
 
 import { KpiGrid, type KpiItem } from "@/components/dashboard/kpi-grid";
 import { TimeseriesChart } from "@/components/dashboard/timeseries-chart";
+import { ClaudeRebillChart } from "@/components/dashboard/claude-rebill-chart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCompactNumber, formatUsd } from "@/lib/format";
 import type { TimeseriesRow } from "@/server/metrics";
@@ -41,6 +52,24 @@ type SeatConfig = {
   billingResetDay?: number;
 };
 
+type BurnForecast = {
+  policy: { reloadAmountUsd: number; startedOn: string | null };
+  seatFeeAnnualUsd: number;
+  trailing30Burn: number;
+  trailing30MonthlyEquivalent: number;
+  projectedDaysToNextRebill: number | null;
+  projectedAnnualExtras: number;
+  projectedAnnualTotal: number;
+  cumulativeSinceCycleStart: { date: string; daily: number; cumulative: number }[];
+  rebillMarkers: { date: string; rebillNumber: number }[];
+};
+
+function formatDays(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (value >= 30) return `${value.toFixed(0)} d`;
+  return `${value.toFixed(1)} d`;
+}
+
 export function ClaudeEnterpriseOverviewClient() {
   const searchParams = useSearchParams();
   const qs = searchParams.toString();
@@ -52,6 +81,7 @@ export function ClaudeEnterpriseOverviewClient() {
   const [snapshot, setSnapshot] = useState<SeatSnapshot | null>(null);
   const [extended, setExtended] = useState<ExtendedTotals | null>(null);
   const [seatConfig, setSeatConfig] = useState<SeatConfig | null>(null);
+  const [burn, setBurn] = useState<BurnForecast | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -59,18 +89,20 @@ export function ClaudeEnterpriseOverviewClient() {
     (async () => {
       setLoading(true);
       try {
-        const [sumRes, tsRes, snapRes, extRes, seatRes] = await Promise.all([
+        const [sumRes, tsRes, snapRes, extRes, seatRes, burnRes] = await Promise.all([
           fetch(`/api/metrics/summary?${fullQs}`, { cache: "no-store" }),
           fetch(`/api/metrics/timeseries?${fullQs}`, { cache: "no-store" }),
           fetch("/api/settings/claude-enterprise/snapshot", { cache: "no-store" }),
           fetch(`/api/metrics/claude-enterprise-totals?${fullQs}`, { cache: "no-store" }),
           fetch(`/api/settings/seats?source=${source}`, { cache: "no-store" }),
+          fetch("/api/metrics/claude-enterprise-burn", { cache: "no-store" }),
         ]);
         const sumJson = await sumRes.json();
         const tsJson = await tsRes.json();
         const snapJson = snapRes.ok ? await snapRes.json() : null;
         const extJson = extRes.ok ? await extRes.json() : null;
         const seatJson = seatRes.ok ? await seatRes.json() : null;
+        const burnJson = burnRes.ok ? await burnRes.json() : null;
 
         if (!cancelled) {
           setSummary(sumJson as SummaryData);
@@ -78,6 +110,7 @@ export function ClaudeEnterpriseOverviewClient() {
           if (snapJson?.snapshot) setSnapshot(snapJson.snapshot as SeatSnapshot);
           if (extJson?.totals) setExtended(extJson.totals as ExtendedTotals);
           if (seatJson?.config) setSeatConfig(seatJson.config as SeatConfig);
+          if (burnJson) setBurn(burnJson as BurnForecast);
         }
       } catch {
         /* empty state handled below */
@@ -139,6 +172,27 @@ export function ClaudeEnterpriseOverviewClient() {
     });
   }
 
+  if (burn) {
+    kpis.push({
+      label: "Annual run-rate",
+      value: formatUsd(burn.projectedAnnualTotal),
+      hint: `Seat fee + extras (trailing-30 × 12)`,
+      icon: TrendingUp,
+    });
+    kpis.push({
+      label: "Trailing-30 extras / mo",
+      value: formatUsd(burn.trailing30MonthlyEquivalent),
+      hint: `~ ${formatUsd(burn.trailing30Burn)} / day`,
+      icon: Flame,
+    });
+    kpis.push({
+      label: "Days to next rebill",
+      value: formatDays(burn.projectedDaysToNextRebill),
+      hint: `Rebill amount: ${formatUsd(burn.policy.reloadAmountUsd)}`,
+      icon: CalendarClock,
+    });
+  }
+
   if (extended) {
     if (extended.commits > 0) {
       kpis.push({
@@ -175,6 +229,17 @@ export function ClaudeEnterpriseOverviewClient() {
         />
       </div>
 
+      {burn && burn.cumulativeSinceCycleStart.length > 0 ? (
+        <ClaudeRebillChart
+          title="Daily extras burn & rebill cadence"
+          description={`Markers are derived: cumulative crossing ${formatUsd(burn.policy.reloadAmountUsd)} triggers a synthetic rebill. ${burn.rebillMarkers.length} marker${burn.rebillMarkers.length === 1 ? "" : "s"} in window.`}
+          cumulative={burn.cumulativeSinceCycleStart}
+          rebillMarkers={burn.rebillMarkers}
+          reloadAmountUsd={burn.policy.reloadAmountUsd}
+          syncId="cl-ent-rebill"
+        />
+      ) : null}
+
       {extended && (extended.linesAdded > 0 || extended.linesDeleted > 0 || extended.sessions > 0) ? (
         <div className="rounded-2xl bg-card p-5 shadow-sm">
           <h3 className="mb-3 text-sm font-semibold tracking-tight">Claude Code output (window)</h3>
@@ -196,8 +261,9 @@ export function ClaudeEnterpriseOverviewClient() {
       ) : null}
 
       <div className="rounded-lg border border-blue-300/40 bg-blue-50 p-3 text-xs leading-relaxed text-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
-        Claude Enterprise usage is covered by the seat contract — there&apos;s no per-message billing. Data has a
-        3-day lag from the Analytics API.
+        Self-serve Enterprise — seat-based with pre-purchased extra usage. Seat contract covers each seat&apos;s
+        included allowance. Anything above the allowance draws from a Prepaid Extra Usage pool that auto-reloads at
+        the amount configured in Settings (default $300). Anthropic Analytics has a 3-day data lag.
       </div>
     </div>
   );

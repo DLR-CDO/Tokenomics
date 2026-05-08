@@ -8,7 +8,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatUsd } from "@/lib/format";
 import { useSeatConfig, useSync, SyncCard } from "@/components/dashboard/settings-client";
-import { SupplementalPurchasesCard } from "@/components/dashboard/supplemental-purchases-card";
+import { ClaudeEnterpriseReconCard } from "@/components/dashboard/claude-enterprise-recon-card";
+import { ClaudeExtraUsagePolicyCard } from "@/components/dashboard/claude-extra-usage-policy-card";
+import { ClaudeBurnForecastCard } from "@/components/dashboard/claude-burn-forecast-card";
 
 type SeatSnapshot = {
   capturedOn: string;
@@ -56,7 +58,8 @@ export default function ClaudeEnterpriseSettingsPage() {
       <div>
         <h2 className="text-xl font-semibold tracking-tight">Claude Enterprise</h2>
         <p className="text-sm text-muted-foreground">
-          Seat pricing, live seat snapshot from the Analytics API, and data sync for the Claude Enterprise plan.
+          Self-serve Enterprise — seat-based with pre-purchased extra usage. The Anthropic Analytics API is the
+          authoritative source for spend; no manual receipt entry required.
         </p>
       </div>
 
@@ -68,18 +71,20 @@ export default function ClaudeEnterpriseSettingsPage() {
         sync={sync}
       />
 
+      <ClaudeEnterpriseReconCard />
+
       <Card>
         <CardHeader>
-          <CardTitle>Seat Pricing</CardTitle>
+          <CardTitle>Contract</CardTitle>
           <CardDescription>
-            Track seat costs and monthly spend for your Claude Enterprise contract. The Analytics API does not expose
-            billed cost, so contract pricing is the source of truth.
+            The flat seat fee covers each seat&apos;s included usage allowance. Extra usage above the allowance is
+            billed separately via the Prepaid Extra Usage pool (configured below).
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div className="space-y-2">
-              <Label htmlFor="claude-annual-cost">Annual contract cost (USD)</Label>
+              <Label htmlFor="claude-annual-cost">Annual seat fee (USD)</Label>
               <Input
                 id="claude-annual-cost"
                 type="number"
@@ -117,9 +122,9 @@ export default function ClaudeEnterpriseSettingsPage() {
           </div>
           {entMonthlyAllocation != null ? (
             <div className="rounded-lg border p-3 text-sm">
-              <span className="text-muted-foreground">Monthly allocation: </span>
+              <span className="text-muted-foreground">Monthly seat allocation: </span>
               <span className="font-semibold">{formatUsd(entMonthlyAllocation)}</span>
-              <span className="text-muted-foreground"> / month</span>
+              <span className="text-muted-foreground"> / month (seat fee only — extras tracked separately)</span>
             </div>
           ) : null}
           <div className="flex items-center gap-3">
@@ -131,11 +136,9 @@ export default function ClaudeEnterpriseSettingsPage() {
         </CardContent>
       </Card>
 
-      <SupplementalPurchasesCard
-        source="claude_enterprise"
-        title="Supplemental Purchases"
-        description="Mid-cycle credit top-ups and plan upgrades that aren't part of the base annual contract. Each purchase is added to total spend on its date and flows through to the Global Overview, Forecast, and per-app totals."
-      />
+      <ClaudeExtraUsagePolicyCard />
+
+      <ClaudeBurnForecastCard />
 
       <Card>
         <CardHeader>
@@ -195,6 +198,12 @@ export default function ClaudeEnterpriseSettingsPage() {
               cannot be backfilled.
             </li>
             <li>Data has a 3-day lag; the most recent available date is always <code>today − 3</code>.</li>
+            <li>
+              Prepaid Extra Usage <em>consumption</em> appears in <code>cost_usd</code> on a 3-day lag and continues
+              to revise for up to 30 days. Auto-reload events themselves are not surfaced by the API — only the
+              consumption that triggers them, so rebill markers in the dashboard charts are derived from the
+              cumulative-burn curve crossing the configured reload amount.
+            </li>
             <li>
               Analytics keys require the <code>read:analytics</code> scope and can only be minted by a Primary Owner
               at <code>claude.ai/analytics/api-keys</code>.

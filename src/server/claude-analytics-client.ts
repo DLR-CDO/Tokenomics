@@ -142,6 +142,175 @@ export interface PagedResponse<T> {
   next_page: string | null;
 }
 
+/* ---------- Cost / Usage report types (beta) ---------- */
+
+export type CostUsageProduct =
+  | "chat"
+  | "claude_code"
+  | "cowork"
+  | "office_agent"
+  | "claude_in_chrome"
+  | "claude_design";
+
+export type ContextWindow = "0-200k" | "200k-1M";
+export type InferenceGeo = "global" | "us" | "not_available";
+export type InferenceSpeed = "fast" | "standard";
+
+export interface UserActor {
+  type: "user_actor";
+  user_id: string;
+  name: string | null;
+  email: string | null;
+  deleted?: boolean;
+}
+
+export interface CacheCreationTokens {
+  ephemeral_5m_input_tokens?: number;
+  ephemeral_1h_input_tokens?: number;
+}
+
+export interface ServerToolUse {
+  web_search_requests?: number;
+}
+
+/** One row from `/user_usage_report`. Dimension fields are non-null when group_by[] includes them. */
+export interface UserUsageRow {
+  actor: UserActor;
+  product: CostUsageProduct | null;
+  model: string | null;
+  context_window: ContextWindow | null;
+  inference_geo: InferenceGeo | null;
+  speed: InferenceSpeed | null;
+  uncached_input_tokens?: number;
+  cache_creation?: CacheCreationTokens;
+  cache_read_input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  server_tool_use?: ServerToolUse;
+  requests?: number;
+}
+
+/** One row from `/user_cost_report`. */
+export interface UserCostRow {
+  actor: UserActor;
+  product: CostUsageProduct | null;
+  model: string | null;
+  context_window: ContextWindow | null;
+  inference_geo: InferenceGeo | null;
+  speed: InferenceSpeed | null;
+  currency: "USD";
+  /** Decimal string of fractional cents — divide by 100 for USD. */
+  amount: string;
+  list_amount: string;
+  cost_type: "tokens" | "web_search" | "code_execution" | null;
+  token_type: string | null;
+  requests?: number;
+}
+
+export interface UsageBucketResult {
+  product: CostUsageProduct | null;
+  model: string | null;
+  context_window: ContextWindow | null;
+  inference_geo: InferenceGeo | null;
+  speed: InferenceSpeed | null;
+  uncached_input_tokens?: number;
+  cache_creation?: CacheCreationTokens;
+  cache_read_input_tokens?: number;
+  output_tokens?: number;
+  server_tool_use?: ServerToolUse;
+}
+
+/** One row from `/usage_report`: a time bucket containing one or more group results. */
+export interface UsageBucket {
+  starting_at: string;
+  ending_at: string;
+  results: UsageBucketResult[];
+}
+
+export interface CostBucketResult {
+  product: CostUsageProduct | null;
+  model: string | null;
+  context_window: ContextWindow | null;
+  inference_geo: InferenceGeo | null;
+  speed: InferenceSpeed | null;
+  cost_type: "tokens" | "web_search" | "code_execution" | null;
+  token_type: string | null;
+  currency: "USD";
+  amount: string;
+  list_amount: string;
+}
+
+/** One row from `/cost_report`. */
+export interface CostBucket {
+  starting_at: string;
+  ending_at: string;
+  results: CostBucketResult[];
+}
+
+export interface UserUsageReportQuery {
+  startingAt: string;
+  endingAt: string;
+  products?: CostUsageProduct[];
+  models?: string[];
+  userIds?: string[];
+  contextWindows?: ContextWindow[];
+  inferenceGeos?: InferenceGeo[];
+  speeds?: InferenceSpeed[];
+  groupBy?: Array<"product" | "model" | "context_window" | "inference_geo" | "speed">;
+  orderBy?: "total_tokens" | "output_tokens" | "uncached_input_tokens";
+  excludeDeletedUsers?: boolean;
+  order?: "desc" | "asc";
+  limit?: number;
+}
+
+export interface UserCostReportQuery {
+  startingAt: string;
+  endingAt: string;
+  products?: CostUsageProduct[];
+  models?: string[];
+  userIds?: string[];
+  contextWindows?: ContextWindow[];
+  inferenceGeos?: InferenceGeo[];
+  speeds?: InferenceSpeed[];
+  groupBy?: Array<
+    "product" | "model" | "context_window" | "inference_geo" | "speed" | "cost_type" | "token_type"
+  >;
+  orderBy?: "amount" | "list_amount";
+  excludeDeletedUsers?: boolean;
+  order?: "desc" | "asc";
+  limit?: number;
+}
+
+export interface UsageReportQuery {
+  startingAt: string;
+  endingAt: string;
+  bucketWidth?: "1m" | "1h" | "1d";
+  groupBy?: Array<"product" | "model" | "context_window" | "inference_geo" | "speed">;
+  products?: CostUsageProduct[];
+  models?: string[];
+  userIds?: string[];
+  contextWindows?: ContextWindow[];
+  inferenceGeos?: InferenceGeo[];
+  speeds?: InferenceSpeed[];
+  limit?: number;
+}
+
+export interface CostReportQuery {
+  startingAt: string;
+  endingAt: string;
+  bucketWidth?: "1m" | "1h" | "1d";
+  groupBy?: Array<
+    "product" | "model" | "context_window" | "inference_geo" | "speed" | "cost_type" | "token_type"
+  >;
+  products?: CostUsageProduct[];
+  models?: string[];
+  userIds?: string[];
+  contextWindows?: ContextWindow[];
+  inferenceGeos?: InferenceGeo[];
+  speeds?: InferenceSpeed[];
+  limit?: number;
+}
+
 /* ---------- Client ---------- */
 
 interface ClaudeAnalyticsClientOptions {
@@ -251,6 +420,209 @@ export class ClaudeAnalyticsClient {
       limit,
     );
   }
+
+  /* ---------- Cost / Usage report endpoints (beta) ---------- */
+
+  /**
+   * Page through `/user_usage_report`. Yields one row per user (one per
+   * group when `groupBy` is set). Caller is responsible for chunking ranges
+   * larger than 31 days via `chunkRange31d`.
+   */
+  async *listUserUsageReport(opts: UserUsageReportQuery): AsyncGenerator<UserUsageRow> {
+    const params = buildCostUsageParams({
+      starting_at: opts.startingAt,
+      ending_at: opts.endingAt,
+      "products[]": opts.products,
+      "models[]": opts.models,
+      "user_ids[]": opts.userIds,
+      "context_windows[]": opts.contextWindows,
+      "inference_geos[]": opts.inferenceGeos,
+      "speeds[]": opts.speeds,
+      "group_by[]": opts.groupBy,
+      order_by: opts.orderBy,
+      exclude_deleted_users: opts.excludeDeletedUsers,
+      order: opts.order,
+      limit: opts.limit ?? 1000,
+    });
+    yield* this.paginateCostUsage<UserUsageRow>(
+      "/organizations/analytics/user_usage_report",
+      params,
+    );
+  }
+
+  /** Page through `/user_cost_report`. */
+  async *listUserCostReport(opts: UserCostReportQuery): AsyncGenerator<UserCostRow> {
+    const params = buildCostUsageParams({
+      starting_at: opts.startingAt,
+      ending_at: opts.endingAt,
+      "products[]": opts.products,
+      "models[]": opts.models,
+      "user_ids[]": opts.userIds,
+      "context_windows[]": opts.contextWindows,
+      "inference_geos[]": opts.inferenceGeos,
+      "speeds[]": opts.speeds,
+      "group_by[]": opts.groupBy,
+      order_by: opts.orderBy,
+      exclude_deleted_users: opts.excludeDeletedUsers,
+      order: opts.order,
+      limit: opts.limit ?? 1000,
+    });
+    yield* this.paginateCostUsage<UserCostRow>(
+      "/organizations/analytics/user_cost_report",
+      params,
+    );
+  }
+
+  /** Page through `/usage_report`. Yields one bucket per iteration. */
+  async *listUsageReport(opts: UsageReportQuery): AsyncGenerator<UsageBucket> {
+    // limit defaults differ by bucket_width: 1d→7 (max 31), 1h→24 (max 168), 1m→60 (max 256)
+    const bucket = opts.bucketWidth ?? "1d";
+    const defaultLimit = bucket === "1d" ? 31 : bucket === "1h" ? 168 : 256;
+    const params = buildCostUsageParams({
+      starting_at: opts.startingAt,
+      ending_at: opts.endingAt,
+      bucket_width: bucket,
+      "group_by[]": opts.groupBy,
+      "products[]": opts.products,
+      "models[]": opts.models,
+      "user_ids[]": opts.userIds,
+      "context_windows[]": opts.contextWindows,
+      "inference_geos[]": opts.inferenceGeos,
+      "speeds[]": opts.speeds,
+      limit: opts.limit ?? defaultLimit,
+    });
+    yield* this.paginateCostUsage<UsageBucket>(
+      "/organizations/analytics/usage_report",
+      params,
+    );
+  }
+
+  /** Page through `/cost_report`. */
+  async *listCostReport(opts: CostReportQuery): AsyncGenerator<CostBucket> {
+    const bucket = opts.bucketWidth ?? "1d";
+    const defaultLimit = bucket === "1d" ? 31 : bucket === "1h" ? 168 : 256;
+    const params = buildCostUsageParams({
+      starting_at: opts.startingAt,
+      ending_at: opts.endingAt,
+      bucket_width: bucket,
+      "group_by[]": opts.groupBy,
+      "products[]": opts.products,
+      "models[]": opts.models,
+      "user_ids[]": opts.userIds,
+      "context_windows[]": opts.contextWindows,
+      "inference_geos[]": opts.inferenceGeos,
+      "speeds[]": opts.speeds,
+      limit: opts.limit ?? defaultLimit,
+    });
+    yield* this.paginateCostUsage<CostBucket>(
+      "/organizations/analytics/cost_report",
+      params,
+    );
+  }
+
+  /**
+   * Cursor pagination for cost+usage endpoints.
+   *
+   * Anthropic requires the cursor be passed back unchanged with identical
+   * query parameters. We send the same `URLSearchParams` on every page and
+   * append/replace only `page=`. If the API returns 400/410 on a stale
+   * cursor (e.g. from a long-lived job), we throw — the caller should
+   * restart from the first page.
+   */
+  private async *paginateCostUsage<T>(
+    path: string,
+    baseParams: URLSearchParams,
+  ): AsyncGenerator<T> {
+    let cursor: string | undefined;
+    while (true) {
+      const params = new URLSearchParams(baseParams.toString());
+      if (cursor) params.set("page", cursor);
+
+      const res = await this.request<PagedResponse<T>>(`${path}?${params.toString()}`);
+      const rows = Array.isArray(res?.data) ? res.data : [];
+      for (const row of rows) yield row;
+      if (!res?.next_page) return;
+      cursor = res.next_page;
+    }
+  }
+}
+
+/* ---------- Cost / Usage helpers ---------- */
+
+const FRACTIONAL_CENT_USD_DIVISOR = 100;
+
+/**
+ * Parse a fractional-cent decimal string (e.g. "41280.000000") to USD.
+ * Per the API spec: amounts are decimal strings denominated in cents, divide by 100 for USD.
+ *
+ * Precision note: JS `Number.parseFloat` provides ~15 significant digits; this
+ * is safe up to roughly $90B. Above that range, prefer a decimal library to
+ * avoid losing precision. For our usage volumes this is comfortably below the
+ * danger threshold.
+ */
+export function parseFractionalCentUsd(value: string | number | null | undefined): number {
+  if (value == null) return 0;
+  const n = typeof value === "number" ? value : Number.parseFloat(value);
+  if (!Number.isFinite(n)) return 0;
+  return n / FRACTIONAL_CENT_USD_DIVISOR;
+}
+
+/**
+ * Split [startIso, endIso] into adjacent windows of at most 31 days each
+ * (the per-query maximum imposed by the cost+usage endpoints). Inputs and
+ * outputs are RFC 3339 datetimes. The last window's `endingAt` matches the
+ * caller's `endIso`.
+ */
+export function chunkRange31d(
+  startIso: string,
+  endIso: string,
+): Array<{ startingAt: string; endingAt: string }> {
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+
+  const MAX_MS = 31 * 24 * 60 * 60 * 1000;
+  const windows: Array<{ startingAt: string; endingAt: string }> = [];
+  let cursor = start;
+  while (cursor < end) {
+    const next = Math.min(cursor + MAX_MS, end);
+    windows.push({
+      startingAt: new Date(cursor).toISOString(),
+      endingAt: new Date(next).toISOString(),
+    });
+    cursor = next;
+  }
+  return windows;
+}
+
+/**
+ * Build a URLSearchParams from a record where bracketed keys (e.g. "products[]")
+ * map to arrays of values. Repeats the bracketed key for each entry, matching
+ * the Anthropic spec: `products[]=chat&products[]=claude_code`.
+ *
+ * Skips null/undefined and empty arrays. Booleans serialize as "true"/"false".
+ * Numbers serialize via toString. Strings pass through.
+ */
+function buildCostUsageParams(
+  shape: Record<string, string | number | boolean | string[] | undefined>,
+): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(shape)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      for (const v of value) {
+        if (v == null || v === "") continue;
+        params.append(key, String(v));
+      }
+      continue;
+    }
+    if (typeof value === "boolean") {
+      params.set(key, value ? "true" : "false");
+      continue;
+    }
+    params.set(key, String(value));
+  }
+  return params;
 }
 
 export class ClaudeAnalyticsError extends Error {

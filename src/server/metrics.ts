@@ -39,13 +39,19 @@ export async function getSummary(filters: DashboardFilters, source: string) {
   const [row] = await db
     .select({
       tokens: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} in ('tokens_in','tokens_out') then ${usageFacts.amount} else 0 end), 0)`,
-      requests: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'requests' then ${usageFacts.amount} else 0 end), 0)`,
+      requests: source === "claude_enterprise"
+        ? sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'requests' and ${usageFacts.externalId} not like 'claude_enterprise:cost_endpoint:%' then ${usageFacts.amount} else 0 end), 0)`
+        : sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'requests' then ${usageFacts.amount} else 0 end), 0)`,
       cycleSpendUsd: isCursor
         ? sql<number>`coalesce(sum(case when ${usageFacts.externalId} like 'cursor:spend:cycle:%' then ${usageFacts.amount} else 0 end), 0)`
         : sql<number>`0`,
       windowSpendUsd: isCursor
         ? sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'cost_usd' and ${usageFacts.externalId} not like 'cursor:spend:cycle:%' then ${usageFacts.amount} else 0 end), 0)`
-        : sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'cost_usd' then ${usageFacts.amount} else 0 end), 0)`,
+        : source === "claude_enterprise"
+          // See getTimeseries: count only the per-product bucket facts so we
+          // don't double/triple-count the per-user / per-model cost facts.
+          ? sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'cost_usd' and ${usageFacts.externalId} like 'claude_enterprise:cost:bucket:product:%' then ${usageFacts.amount} else 0 end), 0)`
+          : sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'cost_usd' then ${usageFacts.amount} else 0 end), 0)`,
       linesAdded: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'lines_added' then ${usageFacts.amount} else 0 end), 0)`,
       agentEditsAccepted: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'agent_edits_accepted' then ${usageFacts.amount} else 0 end), 0)`,
       avgDau: sql<number>`coalesce(avg(case when ${usageFacts.metricKind} = 'dau' then ${usageFacts.amount} end), 0)`,
@@ -107,10 +113,25 @@ export async function getTimeseries(filters: DashboardFilters, source: string): 
       tokensOut: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'tokens_out' then ${usageFacts.amount} else 0 end), 0)`,
       requests: isCursor
         ? sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'requests' and (${usageFacts.dimensionsJson}->>'subtype') is distinct from 'model_messages' then ${usageFacts.amount} else 0 end), 0)`
-        : sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'requests' then ${usageFacts.amount} else 0 end), 0)`,
+        : source === "claude_enterprise"
+          // Skip the cost-endpoint request facts here to keep this number
+          // aligned with the historical engagement-side definition (chat
+          // messages, code sessions, etc.). The Tokens / Spend pages query
+          // the cost-endpoint requests directly when they need the API-side
+          // request count.
+          ? sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'requests' and ${usageFacts.externalId} not like 'claude_enterprise:cost_endpoint:%' then ${usageFacts.amount} else 0 end), 0)`
+          : sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'requests' then ${usageFacts.amount} else 0 end), 0)`,
       costUsd: isCursor
         ? sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'cost_usd' and ${usageFacts.externalId} not like 'cursor:spend:cycle:%' then ${usageFacts.amount} else 0 end), 0)`
-        : sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'cost_usd' then ${usageFacts.amount} else 0 end), 0)`,
+        : source === "claude_enterprise"
+          // Claude Enterprise writes cost_usd from three sources (per-user
+          // rows, per-product bucket rows, per-model bucket rows). Each source
+          // sums to the same per-day total. To avoid triple-counting in
+          // Overview / Forecast / global rollup we count only the per-product
+          // bucket. The dedicated Spend page queries the other prefixes
+          // directly when it needs per-user / per-model breakdowns.
+          ? sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'cost_usd' and ${usageFacts.externalId} like 'claude_enterprise:cost:bucket:product:%' then ${usageFacts.amount} else 0 end), 0)`
+          : sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'cost_usd' then ${usageFacts.amount} else 0 end), 0)`,
       dau: sql<number>`coalesce(max(case when ${usageFacts.metricKind} = 'dau' then ${usageFacts.amount} end), 0)`,
       linesAdded: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'lines_added' then ${usageFacts.amount} else 0 end), 0)`,
       credits: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'credits' then ${usageFacts.amount} else 0 end), 0)`,
@@ -612,6 +633,8 @@ export type EnhancedMemberRow = RankedMemberRow & {
   tabsShown: number;
   tabsAccepted: number;
   credits: number;
+  tokensIn: number;
+  tokensOut: number;
 };
 
 export async function getEnhancedRankedMembers(filters: DashboardFilters, source: string, limit = 50): Promise<EnhancedMemberRow[]> {
@@ -637,6 +660,8 @@ export async function getEnhancedRankedMembers(filters: DashboardFilters, source
       tabsShown: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'tabs_shown' then ${usageFacts.amount} else 0 end), 0)`,
       tabsAccepted: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'tabs_accepted' then ${usageFacts.amount} else 0 end), 0)`,
       credits: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'credits' then ${usageFacts.amount} else 0 end), 0)`,
+      tokensIn: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'tokens_in' then ${usageFacts.amount} else 0 end), 0)`,
+      tokensOut: sql<number>`coalesce(sum(case when ${usageFacts.metricKind} = 'tokens_out' then ${usageFacts.amount} else 0 end), 0)`,
     })
     .from(usageFacts)
     .innerJoin(dimMember, eq(usageFacts.memberId, dimMember.id))
@@ -658,6 +683,8 @@ export async function getEnhancedRankedMembers(filters: DashboardFilters, source
     tabsShown: Number(r.tabsShown),
     tabsAccepted: Number(r.tabsAccepted),
     credits: Number(r.credits),
+    tokensIn: Number(r.tokensIn),
+    tokensOut: Number(r.tokensOut),
   }));
 }
 
@@ -703,6 +730,8 @@ export async function getAllMembersWithUsage(filters: DashboardFilters, source: 
     tabsShown: 0,
     tabsAccepted: 0,
     credits: Number(r.credits),
+    tokensIn: Number(r.tokensIn),
+    tokensOut: Number(r.tokensOut),
   }));
 }
 

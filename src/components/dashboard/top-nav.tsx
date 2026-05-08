@@ -47,6 +47,8 @@ const TABS: Record<string, readonly { id: string; label: string }[]> = {
   "claude-enterprise": [
     { id: "overview", label: "Overview" },
     { id: "activity", label: "Activity" },
+    { id: "spend", label: "Spend" },
+    { id: "tokens", label: "Tokens" },
     { id: "people", label: "People" },
     { id: "projects", label: "Projects" },
     { id: "skills", label: "Skills" },

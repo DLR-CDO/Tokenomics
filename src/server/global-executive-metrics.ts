@@ -4,12 +4,10 @@ import { getDb } from "@/db";
 import { billingCycles, dashboardSettings } from "@/db/schema";
 import type { DashboardFilters, SourceSystem } from "@/lib/filters";
 import { computeEnterpriseCreditRates, hasAnyCreditRate, valuateCredits } from "@/lib/enterprise-credits";
-import {
-  purchasesInRange,
-  readSupplementalPurchases,
-  sumPurchasesInRange,
-  type SupplementalPurchase,
-} from "@/lib/supplemental-purchases";
+// Claude Enterprise (self-serve) no longer reads supplemental purchases:
+// the Anthropic Analytics cost endpoints already report extras consumption
+// directly, so layering receipts on top would double-count. No other source
+// in this module currently uses supplemental purchases either.
 import { getBillingWindowAtOffset } from "@/server/billing-window";
 import { getOpenAIListRateTimeseries } from "@/server/openai-cost";
 import { getSummary, getTimeseries, type TimeseriesRow } from "@/server/metrics";
@@ -62,6 +60,13 @@ type SeatConfig = {
   billingResetDay?: number;
   freeCreditsPerSeatPerMonth?: number;
   costPerOverageCreditUsd?: number;
+  /**
+   * Retained in storage for compatibility but no longer consulted for Claude
+   * Enterprise rollups: self-serve Enterprise is always seat-based, so the
+   * contract is the base and the API cost endpoints (which only report extras
+   * for seat plans) are added on top.
+   */
+  planType?: "seat_based" | "usage_based";
 };
 
 type Range = {
@@ -433,80 +438,85 @@ async function buildClaudeEnterpriseCard(
   range: Range,
   periodLabel?: string,
 ): Promise<ExecutiveAppCard | null> {
-  const [summary, previousSummary, timeseries, seatConfig, supplementals] = await Promise.all([
+  const [summary, previousSummary, timeseries, prevTimeseries, seatConfig] = await Promise.all([
     getSummary(filters, app.source),
     getSummary(prevFilters, app.source),
     getTimeseries(filters, app.source),
+    getTimeseries(prevFilters, app.source),
     readSeatConfig(app.source),
-    readSupplementalPurchases(app.source),
   ]);
+
+  // Self-serve Enterprise is always seat-based: the seat contract is the base
+  // spend, and the Anthropic Analytics cost endpoints report Prepaid Extra
+  // Usage *consumption* on top (per Anthropic's own docs: "these endpoints
+  // will reflect extra usage only" on seat-based plans).
+  //
+  // We intentionally do NOT read supplemental_purchases for Claude anymore.
+  // The API now reports the same consumption that those receipts represent,
+  // and counting both would double-count up to the credit-pack face value.
+  const apiCostUsd = sumCost(timeseries);
+  const prevApiCostUsd = sumCost(prevTimeseries);
 
   if (
     usageScore(summary, 0) <= 0 &&
     !(seatConfig?.annualCost && seatConfig.annualCost > 0) &&
-    supplementals.length === 0
+    apiCostUsd <= 0
   ) {
     return null;
   }
 
   const monthlyValue = (seatConfig?.annualCost ?? 0) > 0 ? (seatConfig?.annualCost ?? 0) / 12 : 0;
-  // For seat-covered products, the "primary" dollar value is the prorated seat spend over the window
-  // PLUS any supplemental top-up purchases (e.g. mid-cycle credit additions) recorded for this source.
   const totalDays = rangeDays(range);
   const daysInMonth = 30;
   const proratedSeatUsd = monthlyValue > 0 ? (monthlyValue * totalDays) / daysInMonth : 0;
-  const supplementalsInRange = sumPurchasesInRange(supplementals, range.from, range.to);
-  const currentUsd = proratedSeatUsd + supplementalsInRange;
 
-  // Prior period also gets prorated seat + any supplementals dated in that window.
+  const currentUsd = proratedSeatUsd + apiCostUsd;
+
   const prevRange = previousRange(range);
   const prevProratedSeatUsd = monthlyValue > 0 ? (monthlyValue * rangeDays(prevRange)) / daysInMonth : 0;
-  const prevSupplementalsInRange = sumPurchasesInRange(supplementals, prevRange.from, prevRange.to);
-  const previousUsd = prevProratedSeatUsd + prevSupplementalsInRange;
+  const previousUsd = prevProratedSeatUsd + prevApiCostUsd;
 
   const warnings: string[] = [];
-  if (monthlyValue <= 0 && supplementals.length === 0) {
+  if (monthlyValue <= 0 && apiCostUsd <= 0) {
     warnings.push("Claude Enterprise seat contract is not configured.");
   }
 
-  // Supplemental purchases ARE realised spend, so they're already in the primary
-  // total above; the projected value is the same (no further extrapolation).
-  const projectedUsd = currentUsd;
+  // Project API cost using trailing-30 burn-rate; seat fee is realised
+  // contract spend with no extrapolation.
+  const dailyApiCost = timeseries.map((r) => ({ date: r.date, value: r.costUsd }));
+  const projectedApiCost = projectWithTrailingRate(apiCostUsd, dailyApiCost, range);
+  const projectedUsd = proratedSeatUsd + projectedApiCost;
+
   const change = changePct(currentUsd, previousUsd);
   const status: ExecutiveStatus =
     warnings.length > 0
       ? "incomplete"
-      : supplementalsInRange > 0
+      : apiCostUsd > 0
         ? "funding-watch"
         : "credit-covered";
   const statusLabel =
     warnings.length > 0
       ? "Incomplete Data"
-      : supplementalsInRange > 0
-        ? "Top-Up Required"
+      : apiCostUsd > 0
+        ? "Extras Consumption"
         : "Covered by Contract";
 
-  // Trend: distribute prorated seat across each calendar day in the window, plus
-  // a one-day spike on each supplemental purchase date that falls in range.
+  // Trend assembly: prorated seat (constant per day) plus per-day API extras.
   const dailySeat = totalDays > 0 ? proratedSeatUsd / totalDays : 0;
-  const seatTrend = trendFromRows(timeseries, () => dailySeat);
-  const supplementalsForRange = purchasesInRange(supplementals, range.from, range.to);
-  const supplementalsByDate = new Map<string, number>();
-  for (const p of supplementalsForRange) {
-    supplementalsByDate.set(p.date, (supplementalsByDate.get(p.date) ?? 0) + p.amountUsd);
-  }
-  const filledSeatTrend = fillTrendRange(seatTrend, range);
-  const trend = filledSeatTrend.map((point) => ({
+  const apiCostByDate = new Map<string, number>(timeseries.map((r) => [r.date, r.costUsd]));
+  const baseTrend = trendFromRows(timeseries, () => dailySeat);
+  const filledBase = fillTrendRange(baseTrend, range);
+  const trend = filledBase.map((point) => ({
     date: point.date,
-    usd: point.usd + (supplementalsByDate.get(point.date) ?? 0),
+    usd: point.usd + (apiCostByDate.get(point.date) ?? 0),
   }));
 
   const recommendation =
     warnings.length > 0
       ? "Claude Enterprise has usage but the contract seat value is not configured; set it in Settings → Claude Enterprise."
-      : supplementalsInRange > 0
-        ? `Claude Enterprise required ${supplementalsForRange.length} supplemental top-up${supplementalsForRange.length === 1 ? "" : "s"} totalling ${supplementalsInRange.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })} this period; factor that into the next contract conversation.`
-        : "Claude Enterprise usage is covered by the flat seat contract; highlight absorbed demand in funding conversations.";
+      : apiCostUsd > 0
+        ? `Claude Enterprise consumed ${apiCostUsd.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })} of Prepaid Extra Usage on top of the seat contract this period; factor it into the next funding conversation.`
+        : "Claude Enterprise usage is fully covered by the seat contract; no extras consumed this period.";
 
   return {
     source: app.source,
@@ -514,7 +524,7 @@ async function buildClaudeEnterpriseCard(
     href: app.href,
     periodLabel,
     primaryUsd: currentUsd,
-    primaryLabel: supplementalsInRange > 0 ? "Contract + top-ups" : "Contract-covered value",
+    primaryLabel: apiCostUsd > 0 ? "Contract + extras" : "Contract-covered value",
     usageLabel: summary.requests > 0 ? "Messages" : "Tokens",
     usageValue: summary.requests > 0 ? summary.requests : summary.tokens,
     tokens: summary.tokens,
@@ -650,16 +660,16 @@ export async function getGlobalDailyUsdTimeseries(
     openaiCost,
     enterpriseTs,
     enterpriseSeats,
+    claudeTs,
     claudeSeats,
-    claudeSupplementals,
   ] = await Promise.all([
     getTimeseries(filters, "cursor"),
     getTimeseries(filters, "azure"),
     getOpenAIListRateTimeseries(filters),
     getTimeseries(filters, "openai_enterprise"),
     readSeatConfig("openai_enterprise"),
+    getTimeseries(filters, "claude_enterprise"),
     readSeatConfig("claude_enterprise"),
-    readSupplementalPurchases("claude_enterprise"),
   ]);
 
   for (const r of cursorTs) addPoint(r.date, r.costUsd);
@@ -687,24 +697,24 @@ export async function getGlobalDailyUsdTimeseries(
     addPoint(r.date, usd);
   }
 
-  // Claude Enterprise: flat seat contract prorated across HISTORICAL days only.
-  // We deliberately do NOT fill future-dated days here — doing so would pollute
-  // forecastFromDaily's input (it treats every point as realised history) and
-  // the projection tail would collapse to Claude's $14/day flat rate. The full
-  // contract value is still captured in getGlobalForecastSummary via Overview's
-  // per-app card, which is what the recommendation/headline number uses.
+  // Claude Enterprise (self-serve) is always seat-based: prorated contract is
+  // the base, and the API cost endpoints report Prepaid Extra Usage
+  // *consumption* on top. No supplemental-purchase entries are read here —
+  // doing so would double-count the same dollars the API already reports.
+  //
+  // We intentionally do NOT fill future-dated days for the seat fill — doing
+  // so would pollute forecastFromDaily's input (it treats every point as
+  // realised history) and the projection tail would collapse to Claude's
+  // ~$14/day flat rate.
   const claudeMonthlyValue = (claudeSeats?.annualCost ?? 0) > 0 ? (claudeSeats?.annualCost ?? 0) / 12 : 0;
   if (claudeMonthlyValue > 0) {
     const dailyClaude = claudeMonthlyValue / 30;
     for (const d of historicalDates) addPoint(d, dailyClaude);
   }
 
-  // Claude Enterprise: supplemental top-up purchases land as point-in-time
-  // additions on their purchase date (only those that have already happened).
-  const historicalEnd = new Date(historicalEndMs);
-  for (const p of purchasesInRange(claudeSupplementals, range.from, historicalEnd)) {
-    addPoint(p.date, p.amountUsd);
-  }
+  // Per-day API cost (canonical bucketed source — see getTimeseries override).
+  for (const r of claudeTs) addPoint(r.date, r.costUsd);
+  void historicalEndMs;
 
   return Array.from(sumByDate.entries())
     .sort(([a], [b]) => a.localeCompare(b))
