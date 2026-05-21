@@ -26,12 +26,10 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            // Check both standard Next.js directory structures
             const paths = ['src/app/layout.tsx', 'app/layout.tsx'];
             for (const p of paths) {
               if (fs.existsSync(p)) {
                 let code = fs.readFileSync(p, 'utf8');
-                // Inject the force-dynamic flag at the very top of the file
                 fs.writeFileSync(p, "export const dynamic = 'force-dynamic';\n" + code);
                 console.log('Successfully patched ' + p);
               }
@@ -41,7 +39,7 @@ jobs:
         run: npm run build
 
       - name: Zip artifact for deployment
-        run: zip release.zip ./* .next -qr
+        run: zip -qq -r release.zip .
 
       - name: Upload artifact for deployment
         uses: actions/upload-artifact@v4
@@ -61,11 +59,9 @@ jobs:
         with:
           name: node-app
 
-      - name: Unzip artifact
-        run: unzip -q release.zip
-
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'ai-inference-dashboard' 
+          app-name: 'ai-inference-dashboard'  
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
+          package: release.zip
